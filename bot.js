@@ -34,7 +34,6 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// В сессию добавляем поле для редактирования админом
 bot.use(session({ initial: () => ({ step: "idle", editTarget: null, editField: null }) }));
 
 // --- 🛠️ КЛАВИАТУРЫ ---
@@ -76,7 +75,7 @@ bot.command("start", async (ctx) => {
     let user = await User.findOne({ userId: ctx.from.id });
     if (!user) {
         ctx.session.step = "wait_tariff";
-        const kb = new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized();
+        const kb = new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized().oneTime();
         await ctx.reply("🚕 Привет! Выберите ваш тариф для регистрации:", { reply_markup: kb });
     } else {
         await showMainMenu(ctx, user);
@@ -87,7 +86,6 @@ bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
     const userId = ctx.from.id;
 
-    // Регистрация: Выбор города
     if (data.startsWith("city_")) {
         const city = data.split("_")[1];
         if (city === "other") {
@@ -99,7 +97,6 @@ bot.on("callback_query:data", async (ctx) => {
         await ctx.editMessageText(`✅ Город: ${city}\n\n📝 **Как к вам обращаться?**`, { parse_mode: "Markdown" });
     }
 
-    // Регистрация: Выбор авто
     if (data.startsWith("brand_")) {
         const brand = data.split("_")[1];
         if (brand === "Другая") {
@@ -125,7 +122,6 @@ bot.on("callback_query:data", async (ctx) => {
         await ctx.editMessageText(`✅ Выбрано: ${brand} ${model}\n\n🔢 Введите госномер:`);
     }
 
-    // --- АДМИН-ПАНЕЛЬ ---
     if (data === "back_to_list") {
         const users = await User.find();
         const kb = new InlineKeyboard();
@@ -139,27 +135,25 @@ bot.on("callback_query:data", async (ctx) => {
         const kb = new InlineKeyboard()
             .text("✅ Открыть (31 дн.)", `allow_${tid}`)
             .text("🚫 Закрыть", `block_${tid}`).row()
-            .text("📝 Редактировать данные", `edit_${tid}`).row()
+            .text("📝 Редактировать", `edit_${tid}`).row()
             .text("⬅️ Назад", "back_to_list");
         await ctx.editMessageText(`👤 Профиль: ${u.name}\n🏙 Город: ${u.city}\n🚗 Авто: ${u.car}\n💰 Тариф: ${u.tariff}\n🔓 Доступ: ${u.isAllowed ? "Да" : "Нет"}`, { reply_markup: kb });
     }
 
-    // Вход в режим редактирования (для админа)
     if (data.startsWith("edit_")) {
         const tid = data.split("_")[1];
         ctx.session.editTarget = tid;
         const kb = new InlineKeyboard()
             .text("Имя", `field_name`).text("Город", `field_city`).row()
-            .text("Авто/Номер", `field_car`).text("Тариф", `field_tariff`).row()
+            .text("Авто", `field_car`).text("Тариф", `field_tariff`).row()
             .text("⬅️ Отмена", `manage_${tid}`);
-        await ctx.editMessageText("🛠 **Что именно нужно исправить?**", { reply_markup: kb, parse_mode: "Markdown" });
+        await ctx.editMessageText("🛠 Что исправляем?", { reply_markup: kb });
     }
 
     if (data.startsWith("field_")) {
-        const field = data.split("_")[1];
-        ctx.session.editField = field;
+        ctx.session.editField = data.split("_")[1];
         ctx.session.step = "admin_editing";
-        await ctx.editMessageText(`📝 Отправьте новое значение для поля **${field}**:`, { parse_mode: "Markdown" });
+        await ctx.editMessageText(`📝 Введите новое значение:`);
     }
 
     if (data.startsWith("allow_") || data.startsWith("block_")) {
@@ -169,7 +163,7 @@ bot.on("callback_query:data", async (ctx) => {
         await User.findOneAndUpdate({ userId: tid }, { isAllowed: ok, expiryDate: exp });
         await bot.api.sendMessage(tid, ok ? "🎉 Вам открыт доступ на 31 день!" : "❌ Доступ закрыт.").catch(()=>{});
         await ctx.answerCallbackQuery("Статус изменен");
-        await ctx.editMessageText("✅ Выполнено!");
+        await ctx.editMessageText("✅ Готово!");
     }
 });
 
@@ -177,22 +171,15 @@ bot.on("message:text", async (ctx, next) => {
     const text = ctx.msg.text;
     const userId = ctx.from.id;
 
-    // Обработка редактирования админом
     if (ctx.session.step === "admin_editing" && userId === ADMIN_ID) {
         const targetId = ctx.session.editTarget;
         const field = ctx.session.editField;
-        
-        let update = {};
+        const update = {};
         update[field] = text;
         
         await User.findOneAndUpdate({ userId: targetId }, update);
         ctx.session.step = "idle";
-        ctx.session.editTarget = null;
-        ctx.session.editField = null;
-        
-        return ctx.reply(`✅ Данные водителя успешно обновлены!`, { 
-            reply_markup: new InlineKeyboard().text("Вернуться к профилю", `manage_${targetId}`) 
-        });
+        return ctx.reply(`✅ Обновлено!`, { reply_markup: new InlineKeyboard().text("К профилю", `manage_${targetId}`) });
     }
 
     if (["Открыть карту 🔥", "Мой профиль 👤", "Список водителей 📋"].includes(text)) {
@@ -211,7 +198,7 @@ bot.on("message:text", async (ctx, next) => {
         if (text === "Мой профиль 👤") {
             const u = await User.findOne({ userId });
             const d = u?.expiryDate ? dayjs(u.expiryDate).format("DD.MM.YYYY") : "Нет";
-            return ctx.reply(`👤 **Ваш профиль:**\n🏙 Город: ${u.city}\n🚖 Тариф: ${u.tariff}\n🚗 Авто: ${u.car}\n⏳ Доступ до: ${d}`, { parse_mode: "Markdown" });
+            return ctx.reply(`👤 **Ваш профиль:**\n📍 Город: ${u.city}\n🚖 Тариф: ${u.tariff}\n🚗 Авто: ${u.car}\n⏳ Доступ до: ${d}`, { parse_mode: "Markdown" });
         }
         if (text === "Список водителей 📋" && userId === ADMIN_ID) {
             const users = await User.find();
@@ -223,13 +210,15 @@ bot.on("message:text", async (ctx, next) => {
     }
 
     let user = await User.findOne({ userId });
-    if (!user && ctx.session.step === "wait_tariff") user = new User({ userId });
+    if (!user && ctx.session.step === "wait_tariff") user = new User({ userId, username: ctx.from.username });
 
     switch (ctx.session.step) {
         case "wait_tariff":
             user.tariff = text;
             ctx.session.step = "wait_city";
-            await ctx.reply("🏙 Выберите ваш город:", { reply_markup: getCitiesKeyboard() });
+            await ctx.reply("🏙 Выберите ваш город:", { reply_markup: getCitiesKeyboard(), reply_markup: { remove_keyboard: true } });
+            // Здесь фокус: отправляем Inline-клавиатуру и удаляем обычную
+            await ctx.reply("👇 Список городов:", { reply_markup: getCitiesKeyboard() });
             await user.save();
             break;
         case "wait_city_text":
@@ -248,8 +237,8 @@ bot.on("message:text", async (ctx, next) => {
             user.car = `${user.car} [${text.toUpperCase()}]`;
             ctx.session.step = "idle";
             await user.save();
-            await ctx.reply("🏁 Заявка отправлена! Ожидайте активации.");
-            await bot.api.sendMessage(ADMIN_ID, `🔔 Новая заявка от ${user.name} (${user.city})!`);
+            await ctx.reply("🏁 Заявка отправлена!");
+            await bot.api.sendMessage(ADMIN_ID, `🔔 Новая заявка от ${user.name}!`);
             await showMainMenu(ctx, user);
             break;
     }
