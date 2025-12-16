@@ -1,0 +1,12 @@
+{
+  "name": "taxibot",
+  "version": "1.0.0",
+  "description": "Taxi Heatmap Bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "grammy": "^1.38.4"
+  }
+}
