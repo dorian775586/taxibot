@@ -7,6 +7,7 @@
     "start": "node bot.js"
   },
   "dependencies": {
+    "dayjs": "^1.11.19",
     "grammy": "^1.38.4",
     "mongoose": "^9.0.1"
   }

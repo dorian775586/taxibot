@@ -1,6 +1,7 @@
 const { Bot, Keyboard, InlineKeyboard, session } = require("grammy");
 const mongoose = require("mongoose");
 const http = require("http");
+const dayjs = require("dayjs"); // Для работы с датами
 
 // --- ⚙️ НАСТРОЙКИ ---
 const token = "7973955726:AAFpMltfoqwO902Q1su5j6HWipPxEJYM3-o";
@@ -11,154 +12,176 @@ const ADMIN_ID = 623203896;
 const bot = new Bot(token);
 
 // --- 🗄️ БАЗА ДАННЫХ ---
-mongoose.connect(mongoUri)
-    .then(() => console.log("✅ База данных подключена успешно!"))
-    .catch(err => console.error("❌ Ошибка БД:", err));
+mongoose.connect(mongoUri);
 
 const userSchema = new mongoose.Schema({
     userId: { type: Number, unique: true },
     name: String,
     car: String,
     tariff: String,
+    city: String, // Новое поле
     isAllowed: { type: Boolean, default: false },
+    expiryDate: Date, // Дата окончания доступа
     username: String
 });
 const User = mongoose.model("User", userSchema);
 
-// --- 🧠 СЕССИИ ---
 bot.use(session({ initial: () => ({ step: "idle" }) }));
 
-// --- 🛠️ ЛОГИКА БОТА ---
+// --- 🛠️ ФУНКЦИИ ---
 
-// Функция главного меню
 async function showMainMenu(ctx, user) {
-    const status = user.isAllowed ? "🟢 Доступ разрешен" : "🔴 Доступ ограничен (ждите активации)";
-    const menu = new Keyboard()
-        .text("Открыть карту 🔥").row()
-        .text("Мой профиль 👤").resized();
+    const menu = new Keyboard().text("Открыть карту 🔥").row().text("Мой профиль 👤");
+    if (ctx.from.id === ADMIN_ID) menu.row().text("Список водителей 📋");
     
-    await ctx.reply(`🏠 **Главное меню**\n\nСтатус: ${status}`, { 
-        reply_markup: menu,
-        parse_mode: "Markdown"
-    });
+    let statusMsg = user.isAllowed ? "🟢 Доступ разрешен" : "🔴 Доступ закрыт";
+    if (user.isAllowed && user.expiryDate) {
+        statusMsg += `\n⏰ До конца: ${dayjs(user.expiryDate).diff(dayjs(), 'day')} дн.`;
+    }
+
+    await ctx.reply(`🏠 **Главное меню**\nСтатус: ${statusMsg}`, { reply_markup: menu.resized(), parse_mode: "Markdown" });
 }
 
-// Команда /start
+// --- 🚀 ОБРАБОТКА КОМАНД ---
+
 bot.command("start", async (ctx) => {
     let user = await User.findOne({ userId: ctx.from.id });
-
     if (!user) {
         ctx.session.step = "wait_tariff";
-        const tariffKb = new Keyboard()
-            .text("Эконом 🚕").text("Комфорт ✨").row()
-            .text("Комфорт+ ⚡").text("Элит 💎").resized().oneTime();
-        
-        await ctx.reply("👋 Привет! Добро пожаловать.\nДля доступа к карте нужно пройти быструю регистрацию.\n\n👇 **Выбери свой тариф:**", { 
-            reply_markup: tariffKb,
-            parse_mode: "Markdown"
-        });
+        const kb = new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized();
+        await ctx.reply("🚕 Привет! Выберите ваш тариф:", { reply_markup: kb });
     } else {
         await showMainMenu(ctx, user);
     }
 });
 
-// 1. СНАЧАЛА проверяем кнопки меню (чтобы они не попадали в регистрацию)
-bot.hears("Мой профиль 👤", async (ctx) => {
-    ctx.session.step = "idle"; // Сбрасываем шаг на всякий случай
-    const user = await User.findOne({ userId: ctx.from.id });
-    if (!user) return ctx.reply("Зарегистрируйтесь через /start ✍️");
-    
-    const status = user.isAllowed ? "✅ Активен" : "⏳ На проверке";
-    await ctx.reply(`👤 **Ваш профиль:**\n\n🗂 Тариф: ${user.tariff}\n📝 ФИО: ${user.name}\n🚗 Авто: ${user.car}\n🔓 Статус: ${status}`, {
-        parse_mode: "Markdown"
+// --- 📋 АДМИН-ПАНЕЛЬ ---
+
+bot.hears("Список водителей 📋", async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const users = await User.find();
+    if (users.length === 0) return ctx.reply("Водителей пока нет.");
+
+    const kb = new InlineKeyboard();
+    users.forEach(u => {
+        const circle = u.isAllowed ? "🟢" : "🔴";
+        kb.text(`${circle} ${u.name || u.userId}`, `manage_${u.userId}`).row();
     });
+    await ctx.reply("👥 **Список всех водителей:**", { reply_markup: kb, parse_mode: "Markdown" });
 });
 
-bot.hears("Открыть карту 🔥", async (ctx) => {
-    ctx.session.step = "idle";
-    const user = await User.findOne({ userId: ctx.from.id });
-    
-    if (user && user.isAllowed) {
-        const webKeyboard = new InlineKeyboard().webApp("🚀 Запустить карту", webAppUrl);
-        await ctx.reply("📍 Карта загружена! Нажмите кнопку ниже для запуска. Удачной смены! 👇", { reply_markup: webKeyboard });
-    } else {
-        await ctx.reply("🚫 **Доступ закрыт.**\n\nВаша заявка еще не одобрена или доступ был ограничен администратором. 👨‍💻", {
-            parse_mode: "Markdown"
-        });
+bot.on("callback_query:data", async (ctx) => {
+    const data = ctx.callbackQuery.data;
+    if (data.startsWith("manage_")) {
+        const targetId = data.split("_")[1];
+        const user = await User.findOne({ userId: targetId });
+        
+        const status = user.isAllowed ? "🟢 Активен" : "🔴 Заблокирован";
+        const expiry = user.expiryDate ? dayjs(user.expiryDate).format("DD.MM.YYYY") : "Нет данных";
+        
+        const kb = new InlineKeyboard()
+            .text("✅ Открыть (31 день)", `allow_${targetId}`)
+            .text("🚫 Закрыть доступ", `block_${targetId}`).row()
+            .text("⬅️ Назад", "back_to_list");
+
+        await ctx.editMessageText(
+            `👤 **Профиль водителя:**\n\nИмя: ${user.name}\nГород: ${user.city}\nАвто: ${user.car}\nТариф: ${user.tariff}\nСтатус: ${status}\nДоступ до: ${expiry}`,
+            { reply_markup: kb, parse_mode: "Markdown" }
+        );
+    }
+
+    if (data === "back_to_list") {
+        const users = await User.find();
+        const kb = new InlineKeyboard();
+        users.forEach(u => { kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name}`, `manage_${u.userId}`).row(); });
+        await ctx.editMessageText("👥 Список всех водителей:", { reply_markup: kb });
+    }
+
+    // Логика кнопок внутри профиля
+    if (data.startsWith("allow_") || data.startsWith("block_")) {
+        const [action, targetId] = data.split("_");
+        const isAllow = action === "allow";
+        const expiry = isAllow ? dayjs().add(31, 'day').toDate() : null;
+
+        await User.findOneAndUpdate({ userId: targetId }, { isAllowed: isAllow, expiryDate: expiry });
+        
+        const msg = isAllow 
+            ? "🎉 Администратор открыл вам доступ на 31 день! Карта активна. 🚕" 
+            : "❌ Ваш доступ к карте был приостановлен администратором.";
+        
+        await bot.api.sendMessage(targetId, msg).catch(() => {});
+        await ctx.answerCallbackQuery(`Готово: ${isAllow ? "Доступ открыт" : "Доступ закрыт"}`);
+        await ctx.editMessageText(`✅ Статус изменен для ${targetId}`);
     }
 });
 
-// 2. ЗАТЕМ админ-команды
+// --- 📝 РЕГИСТРАЦИЯ ---
+
 bot.on("message:text", async (ctx, next) => {
-    if (ctx.from.id !== ADMIN_ID) return next();
-
-    if (ctx.msg.text.startsWith("/allow_")) {
-        const targetId = ctx.msg.text.split("_")[1];
-        await User.findOneAndUpdate({ userId: targetId }, { isAllowed: true });
-        await ctx.reply(`✅ Доступ для пользователя ${targetId} **открыт**!`);
-        await bot.api.sendMessage(targetId, "🎉 Поздравляем! Администратор открыл вам доступ к карте. Погнали! 🚕🔥");
+    const text = ctx.msg.text;
+    if (["Открыть карту 🔥", "Мой профиль 👤", "Список водителей 📋"].includes(text)) {
+        ctx.session.step = "idle";
+        return next();
     }
 
-    if (ctx.msg.text.startsWith("/block_")) {
-        const targetId = ctx.msg.text.split("_")[1];
-        await User.findOneAndUpdate({ userId: targetId }, { isAllowed: false });
-        await ctx.reply(`⚠️ Пользователь ${targetId} **заблокирован**.`);
-        await bot.api.sendMessage(targetId, "❌ Ваш доступ к карте был приостановлен администратором.");
-    }
-    return next();
-});
-
-// 3. И В ПОСЛЕДНЮЮ ОЧЕРЕДЬ обработка регистрации
-bot.on("message:text", async (ctx) => {
-    const userId = ctx.from.id;
-    let user = await User.findOne({ userId });
-
-    if (!user && ctx.session.step === "wait_tariff") {
-        user = new User({ userId, username: ctx.from.username });
-    }
+    let user = await User.findOne({ userId: ctx.from.id });
+    if (!user && ctx.session.step === "wait_tariff") user = new User({ userId: ctx.from.id });
 
     switch (ctx.session.step) {
         case "wait_tariff":
-            user.tariff = ctx.msg.text;
+            user.tariff = text;
+            ctx.session.step = "wait_city";
+            await ctx.reply("🏙 В каком городе будете работать?");
+            await user.save();
+            break;
+        case "wait_city":
+            user.city = text;
             ctx.session.step = "wait_name";
-            await ctx.reply("📝 Принято! Теперь напишите ваше **ФИО**:", { 
-                reply_markup: { remove_keyboard: true },
-                parse_mode: "Markdown"
-            });
+            await ctx.reply("📝 Введите ваше ФИО:");
             await user.save();
             break;
-
         case "wait_name":
-            user.name = ctx.msg.text;
+            user.name = text;
             ctx.session.step = "wait_car";
-            await ctx.reply("🚗 Отлично. Введите **марку и госномер** вашей машины:", {
-                parse_mode: "Markdown"
-            });
+            await ctx.reply("🚗 Введите марку и госномер машины:");
             await user.save();
             break;
-
         case "wait_car":
-            user.car = ctx.msg.text;
+            user.car = text;
             ctx.session.step = "idle";
             await user.save();
-            await ctx.reply("🏁 **Регистрация завершена!**\n\nВаши данные отправлены на проверку. Мы сообщим, когда доступ будет открыт! 🕒", {
-                parse_mode: "Markdown"
-            });
+            await ctx.reply("🏁 Заявка отправлена! Ожидайте подтверждения.");
+            await bot.api.sendMessage(ADMIN_ID, `🔔 Новая заявка: ${user.name} (${user.city})\nПосмотри в "Список водителей 📋"`);
             await showMainMenu(ctx, user);
-            
-            // Уведомление админу
-            await bot.api.sendMessage(ADMIN_ID, `🔔 **Новая заявка!**\n\n🚕 Тариф: ${user.tariff}\n👤 Имя: ${user.name}\n🚘 Авто: ${user.car}\n🆔 ID: ${userId}\n\nЧтобы дать доступ: /allow_${userId}\nЧтобы заблокировать: /block_${userId}`, {
-                parse_mode: "Markdown"
-            });
             break;
     }
 });
 
-bot.start();
-console.log("🚀 Бот успешно запущен!");
+// --- 🔥 ПРОВЕРКА ДОСТУПА (С АВТО-БЛОКОМ) ---
 
-// Сервер для Render
-http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end("Bot is alive and healthy!");
-}).listen(process.env.PORT || 8080);
+bot.hears("Открыть карту 🔥", async (ctx) => {
+    const user = await User.findOne({ userId: ctx.from.id });
+    
+    if (user && user.isAllowed) {
+        // Проверка на просрочку
+        if (user.expiryDate && dayjs().isAfter(dayjs(user.expiryDate))) {
+            user.isAllowed = false;
+            await user.save();
+            return ctx.reply("⌛️ Срок вашего доступа (31 день) истек. Обратитесь к администратору.");
+        }
+        
+        const webKeyboard = new InlineKeyboard().webApp("Запустить карту", webAppUrl);
+        await ctx.reply("📍 Карта активна! Удачной смены!", { reply_markup: webKeyboard });
+    } else {
+        await ctx.reply("🚫 Доступ закрыт.");
+    }
+});
+
+bot.hears("Мой профиль 👤", async (ctx) => {
+    const user = await User.findOne({ userId: ctx.from.id });
+    const exp = user.expiryDate ? dayjs(user.expiryDate).format("DD.MM.YYYY") : "Нет доступа";
+    await ctx.reply(`👤 **Профиль:**\n📍 Город: ${user.city}\n🚖 Тариф: ${user.tariff}\n🚗 Авто: ${user.car}\n⏳ Доступ до: ${exp}`, { parse_mode: "Markdown" });
+});
+
+bot.start();
+http.createServer((req, res) => { res.end("Bot is alive!"); }).listen(process.env.PORT || 8080);
