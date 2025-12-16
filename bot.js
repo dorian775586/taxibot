@@ -6,7 +6,7 @@ const http = require("http");
 const token = "7973955726:AAFpMltfoqwO902Q1su5j6HWipPxEJYM3-o";
 const webAppUrl = "https://hotmaptaxi-git-main-dorians-projects-14978635.vercel.app";
 // ВСТАВЬ СВОЙ ПАРОЛЬ НИЖЕ
-const mongoUri = "mongodb+srv://admin:4zyzCUM1xgvf7w8n@cluster0.36spuej.mongodb.net/?appName=Cluster0"; 
+const mongoUri = "mongodb+srv://user775586:user775586@cluster0.36spuej.mongodb.net/?appName=Cluster0"; 
 const ADMIN_ID = 623203896; // Твой ID из @userinfobot
 
 const bot = new Bot(token);
