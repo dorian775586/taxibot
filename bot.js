@@ -46,20 +46,22 @@ async function fetchFuelPrices(cityName) {
             "Новосибирск": "novosibirsk", "Екатеринбург": "ekaterinburg", 
             "Казань": "kazan", "Челябинск": "chelyabinsk"
         };
-        const slug = cityTranslit[cityName] || "moskva";
-        const { data } = await axios.get(`https://fuelprices.ru/${slug}`, { timeout: 5000 });
+        const slug = cityTranslit[cityName];
+        if (!slug) return null;
+
+        const { data } = await axios.get(`https://fuelprices.ru/${slug}`, { timeout: 8000 });
         const $ = cheerio.load(data);
         const p = [];
         $(".price_table tr td").each((i, el) => p.push($(el).text().trim()));
 
-        if (p.length > 0) {
-            const data = {
+        if (p.length > 5) {
+            const fuelData = {
                 city: cityName,
                 ai92: p[1] || "—", ai95: p[3] || "—", dt: p[5] || "—", gas: p[7] || "—",
                 lastUpdate: new Date()
             };
-            await Fuel.findOneAndUpdate({ city: cityName }, data, { upsert: true });
-            return data;
+            await Fuel.findOneAndUpdate({ city: cityName }, fuelData, { upsert: true });
+            return fuelData;
         }
     } catch (e) {
         console.error(`[PARSER ERROR] ${cityName}:`, e.message);
@@ -129,9 +131,12 @@ bot.on("callback_query:data", async (ctx) => {
     if (data.startsWith("manage_")) {
         const tid = data.split("_")[1];
         const u = await User.findOne({ userId: tid });
+        if (!u) return ctx.answerCallbackQuery("Пользователь не найден");
+
         const kb = new InlineKeyboard()
             .text("✅ Доступ (31д)", `allow_${tid}`)
             .text("🚫 Блок", `block_${tid}`).row()
+            .text("🗑 Удалить профиль", `delete_${tid}`).row()
             .text("⬅️ Назад", "back_to_list");
         await ctx.editMessageText(`👤 ${u.name}\n🏙 Город: ${u.city}\n💰 Тариф: ${u.tariff}\n🔓 Доступ: ${u.isAllowed ? "Да" : "Нет"}`, { reply_markup: kb });
     }
@@ -148,9 +153,19 @@ bot.on("callback_query:data", async (ctx) => {
         const ok = act === "allow";
         const exp = ok ? dayjs().add(31, 'day').toDate() : null;
         await User.findOneAndUpdate({ userId: tid }, { isAllowed: ok, expiryDate: exp });
-        await bot.api.sendMessage(tid, ok ? "🎉 Доступ к карте открыт!" : "❌ Доступ закрыт.");
+        try {
+            await bot.api.sendMessage(tid, ok ? "🎉 Доступ к карте открыт!" : "❌ Доступ закрыт.");
+        } catch(e) {}
         await ctx.answerCallbackQuery("Готово");
         await ctx.editMessageText("✅ Статус обновлен.");
+    }
+
+    // ЛОГИКА УДАЛЕНИЯ ПРОФИЛЯ
+    if (data.startsWith("delete_")) {
+        const tid = data.split("_")[1];
+        await User.findOneAndDelete({ userId: tid });
+        await ctx.answerCallbackQuery("Профиль удален");
+        await ctx.editMessageText("🗑 Профиль успешно удален из базы. Теперь можно регистрироваться заново через /start.");
     }
 });
 
@@ -160,7 +175,8 @@ bot.on("message:text", async (ctx) => {
 
     if (text === "Цены на топливо ⛽️") {
         const u = await User.findOne({ userId });
-        if (!u) return;
+        if (!u || !u.city) return ctx.reply("Сначала выберите город через /start");
+        
         let f = await Fuel.findOne({ city: u.city });
         
         if (!f || dayjs().diff(dayjs(f.lastUpdate), 'hour') > 6) {
@@ -168,7 +184,7 @@ bot.on("message:text", async (ctx) => {
             f = await fetchFuelPrices(u.city);
         }
 
-        if (!f) return ctx.reply("❌ Данные временно недоступны.");
+        if (!f) return ctx.reply("❌ Данные для этого города временно недоступны.");
         return ctx.reply(`⛽️ **Средние цены в г. ${u.city}:**\n\n🔹 АИ-92: ${f.ai92} р.\n🔸 АИ-95: ${f.ai95} р.\n🚜 ДТ: ${f.dt} р.\n💨 Газ: ${f.gas} р.\n\n_🕒 Обновлено: ${dayjs(f.lastUpdate).format("DD.MM HH:mm")}_`, { parse_mode: "Markdown" });
     }
 
@@ -186,6 +202,7 @@ bot.on("message:text", async (ctx) => {
 
     if (text === "Список водителей 📋" && userId === ADMIN_ID) {
         const users = await User.find();
+        if (users.length === 0) return ctx.reply("Список пуст.");
         const kb = new InlineKeyboard();
         users.forEach(u => { kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name}`, `manage_${u.userId}`).row(); });
         return ctx.reply("👥 Список водителей:", { reply_markup: kb });
