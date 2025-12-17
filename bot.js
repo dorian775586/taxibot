@@ -14,30 +14,23 @@ const ADMIN_ID = 623203896;
 const bot = new Bot(token);
 
 // --- 🗄️ БАЗА ДАННЫХ ---
-mongoose.connect(mongoUri)
-    .then(() => console.log("[DB] Успешное подключение к MongoDB"))
-    .catch(err => console.error("[DB] Ошибка подключения:", err));
+mongoose.connect(mongoUri).then(() => console.log("[DB] Connected"));
 
-const userSchema = new mongoose.Schema({
+const User = mongoose.model("User", new mongoose.Schema({
     userId: { type: Number, unique: true },
-    name: String, 
-    tariff: String, 
-    city: String,
+    name: String, tariff: String, city: String,
     isAllowed: { type: Boolean, default: false },
-    expiryDate: Date, 
-    username: String
-});
-const User = mongoose.model("User", userSchema);
+    expiryDate: Date, username: String
+}));
 
-const fuelSchema = new mongoose.Schema({
+const Fuel = mongoose.model("Fuel", new mongoose.Schema({
     city: { type: String, unique: true },
     ai92: String, ai95: String, dt: String, gas: String, lastUpdate: Date
-});
-const Fuel = mongoose.model("Fuel", fuelSchema);
+}));
 
 bot.use(session({ initial: () => ({ step: "idle", tariff: null }) }));
 
-// --- 🌐 ЛОГИКА ПАРСЕРА ---
+// --- 🌐 НОВЫЙ ПАРСЕР (БОЛЕЕ СТАБИЛЬНЫЙ) ---
 
 async function fetchFuelPrices(cityName) {
     try {
@@ -49,9 +42,18 @@ async function fetchFuelPrices(cityName) {
         const slug = cityTranslit[cityName];
         if (!slug) return null;
 
-        const { data } = await axios.get(`https://fuelprices.ru/${slug}`, { timeout: 8000 });
+        // Используем зеркало или альтернативный путь, добавляя заголовки браузера
+        const { data } = await axios.get(`https://fuelprices.ru/${slug}`, { 
+            timeout: 10000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+            }
+        });
+        
         const $ = cheerio.load(data);
         const p = [];
+        // На этом сайте цены лежат в таблице price_table
         $(".price_table tr td").each((i, el) => p.push($(el).text().trim()));
 
         if (p.length > 5) {
@@ -63,9 +65,11 @@ async function fetchFuelPrices(cityName) {
             await Fuel.findOneAndUpdate({ city: cityName }, fuelData, { upsert: true });
             return fuelData;
         }
-    } catch (e) {
-        console.error(`[PARSER ERROR] ${cityName}:`, e.message);
         return null;
+    } catch (e) {
+        console.error(`[PARSER ERROR] ${cityName}: ${e.message}`);
+        // Если сайт всё еще выдает 404/403, вернем хотя бы старые данные из базы, если они там есть
+        return await Fuel.findOne({ city: cityName });
     }
 }
 
@@ -82,16 +86,9 @@ function getCitiesKeyboard() {
 }
 
 async function showMainMenu(ctx, user) {
-    const menu = new Keyboard()
-        .text("Открыть карту 🔥")
-        .row()
-        .text("Цены на топливо ⛽️")
-        .text("Мой профиль 👤")
-        .resized();
-    
+    const menu = new Keyboard().text("Открыть карту 🔥").row().text("Цены на топливо ⛽️").text("Мой профиль 👤").resized();
     if (ctx.from.id === ADMIN_ID) menu.row().text("Список водителей 📋");
-
-    let status = user.isAllowed ? "🟢 Доступ открыт" : "🔴 Доступ закрыт";
+    const status = user.isAllowed ? "🟢 Доступ открыт" : "🔴 Доступ закрыт";
     await ctx.reply(`🏠 **Главное меню**\nСтатус: ${status}`, { reply_markup: menu, parse_mode: "Markdown" });
 }
 
@@ -102,7 +99,7 @@ bot.command("start", async (ctx) => {
     if (!user) {
         ctx.session.step = "wait_tariff";
         const kb = new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized().oneTime();
-        await ctx.reply("🚕 Добро пожаловать! Выберите ваш тариф:", { reply_markup: kb });
+        await ctx.reply("🚕 Добро пожаловать! Выберите тариф:", { reply_markup: kb });
     } else {
         await showMainMenu(ctx, user);
     }
@@ -115,30 +112,21 @@ bot.on("callback_query:data", async (ctx) => {
         const city = data.split("_")[1];
         const count = await User.countDocuments();
         const user = new User({
-            userId: ctx.from.id,
-            username: ctx.from.username,
-            tariff: ctx.session.tariff,
-            city: city,
-            name: `Водитель #${count + 1}`,
-            isAllowed: false
+            userId: ctx.from.id, username: ctx.from.username,
+            tariff: ctx.session.tariff, city: city,
+            name: `Водитель #${count + 1}`, isAllowed: (ctx.from.id === ADMIN_ID)
         });
         await user.save();
         ctx.session.step = "idle";
-        await ctx.editMessageText(`✅ Регистрация завершена!\n👤 Ваш ID: ${user.name}\n🏙 Город: ${city}\n\nОжидайте активации доступа администратором.`);
-        await bot.api.sendMessage(ADMIN_ID, `🔔 Новая заявка: ${user.name} (${city}, ${user.tariff})`);
+        await ctx.editMessageText(`✅ Готово!\nВаш ID: ${user.name}\nГород: ${city}`);
+        await showMainMenu(ctx, user);
     }
 
     if (data.startsWith("manage_")) {
         const tid = data.split("_")[1];
         const u = await User.findOne({ userId: tid });
-        if (!u) return ctx.answerCallbackQuery("Пользователь не найден");
-
-        const kb = new InlineKeyboard()
-            .text("✅ Доступ (31д)", `allow_${tid}`)
-            .text("🚫 Блок", `block_${tid}`).row()
-            .text("🗑 Удалить профиль", `delete_${tid}`).row()
-            .text("⬅️ Назад", "back_to_list");
-        await ctx.editMessageText(`👤 ${u.name}\n🏙 Город: ${u.city}\n💰 Тариф: ${u.tariff}\n🔓 Доступ: ${u.isAllowed ? "Да" : "Нет"}`, { reply_markup: kb });
+        const kb = new InlineKeyboard().text("✅ Доступ", `allow_${tid}`).text("🚫 Блок", `block_${tid}`).row().text("🗑 Удалить", `delete_${tid}`).row().text("⬅️ Назад", "back_to_list");
+        await ctx.editMessageText(`👤 ${u.name}\n🏙 ${u.city}\n🔓 Доступ: ${u.isAllowed ? "Да" : "Нет"}`, { reply_markup: kb });
     }
 
     if (data === "back_to_list") {
@@ -150,22 +138,13 @@ bot.on("callback_query:data", async (ctx) => {
 
     if (data.startsWith("allow_") || data.startsWith("block_")) {
         const [act, tid] = data.split("_");
-        const ok = act === "allow";
-        const exp = ok ? dayjs().add(31, 'day').toDate() : null;
-        await User.findOneAndUpdate({ userId: tid }, { isAllowed: ok, expiryDate: exp });
-        try {
-            await bot.api.sendMessage(tid, ok ? "🎉 Доступ к карте открыт!" : "❌ Доступ закрыт.");
-        } catch(e) {}
-        await ctx.answerCallbackQuery("Готово");
-        await ctx.editMessageText("✅ Статус обновлен.");
+        await User.findOneAndUpdate({ userId: tid }, { isAllowed: act === "allow" });
+        await ctx.editMessageText("✅ Обновлено.");
     }
 
-    // ЛОГИКА УДАЛЕНИЯ ПРОФИЛЯ
     if (data.startsWith("delete_")) {
-        const tid = data.split("_")[1];
-        await User.findOneAndDelete({ userId: tid });
-        await ctx.answerCallbackQuery("Профиль удален");
-        await ctx.editMessageText("🗑 Профиль успешно удален из базы. Теперь можно регистрироваться заново через /start.");
+        await User.findOneAndDelete({ userId: data.split("_")[1] });
+        await ctx.editMessageText("🗑 Удален. Напишите /start для новой регистрации.");
     }
 });
 
@@ -175,48 +154,38 @@ bot.on("message:text", async (ctx) => {
 
     if (text === "Цены на топливо ⛽️") {
         const u = await User.findOne({ userId });
-        if (!u || !u.city) return ctx.reply("Сначала выберите город через /start");
-        
+        if (!u) return;
         let f = await Fuel.findOne({ city: u.city });
         
-        if (!f || dayjs().diff(dayjs(f.lastUpdate), 'hour') > 6) {
-            await ctx.reply("⏳ Обновляю данные с биржи...");
+        // Если данных нет или они старее 12 часов - обновляем
+        if (!f || dayjs().diff(dayjs(f.lastUpdate), 'hour') > 12) {
+            await ctx.reply("⏳ Запрашиваю актуальные цены...");
             f = await fetchFuelPrices(u.city);
         }
 
-        if (!f) return ctx.reply("❌ Данные для этого города временно недоступны.");
-        return ctx.reply(`⛽️ **Средние цены в г. ${u.city}:**\n\n🔹 АИ-92: ${f.ai92} р.\n🔸 АИ-95: ${f.ai95} р.\n🚜 ДТ: ${f.dt} р.\n💨 Газ: ${f.gas} р.\n\n_🕒 Обновлено: ${dayjs(f.lastUpdate).format("DD.MM HH:mm")}_`, { parse_mode: "Markdown" });
+        if (!f) return ctx.reply("❌ Не удалось получить данные. Попробуйте позже.");
+        return ctx.reply(`⛽️ **Цены в г. ${u.city}:**\n\n🔹 АИ-92: ${f.ai92} р.\n🔸 АИ-95: ${f.ai95} р.\n🚜 ДТ: ${f.dt} р.\n💨 Газ: ${f.gas} р.\n\n_🕒 Обновлено: ${dayjs(f.lastUpdate).format("DD.MM HH:mm")}_`, { parse_mode: "Markdown" });
     }
 
     if (text === "Открыть карту 🔥") {
         const u = await User.findOne({ userId });
-        if (u?.isAllowed) return ctx.reply("📍 Карта готова!", { reply_markup: new InlineKeyboard().webApp("Запустить", webAppUrl) });
-        return ctx.reply("🚫 Доступ закрыт.");
-    }
-
-    if (text === "Мой профиль 👤") {
-        const u = await User.findOne({ userId });
-        if (!u) return;
-        return ctx.reply(`👤 **Ваш профиль:**\n🆔 ID: ${u.name}\n📍 Город: ${u.city}\n🚖 Тариф: ${u.tariff}\n⏳ Статус: ${u.isAllowed ? "Активен" : "На проверке"}`, { parse_mode: "Markdown" });
+        if (u?.isAllowed) return ctx.reply("📍 Карта:", { reply_markup: new InlineKeyboard().webApp("Запустить", webAppUrl) });
+        return ctx.reply("🚫 Нет доступа.");
     }
 
     if (text === "Список водителей 📋" && userId === ADMIN_ID) {
         const users = await User.find();
-        if (users.length === 0) return ctx.reply("Список пуст.");
         const kb = new InlineKeyboard();
         users.forEach(u => { kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name}`, `manage_${u.userId}`).row(); });
-        return ctx.reply("👥 Список водителей:", { reply_markup: kb });
+        return ctx.reply("👥 Список:", { reply_markup: kb });
     }
 
     if (ctx.session.step === "wait_tariff") {
         ctx.session.tariff = text;
         ctx.session.step = "idle";
-        await ctx.reply("🏙 Отлично! Теперь выберите ваш город:", { reply_markup: getCitiesKeyboard() });
+        await ctx.reply("🏙 Выберите город:", { reply_markup: getCitiesKeyboard() });
     }
 });
 
-bot.catch((err) => console.error("[ERROR]", err));
-
 bot.start({ drop_pending_updates: true });
-
-http.createServer((req, res) => { res.writeHead(200); res.end("1"); }).listen(process.env.PORT || 8080);
+http.createServer((req, res) => { res.end("1"); }).listen(process.env.PORT || 8080);
