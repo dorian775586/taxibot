@@ -12,14 +12,14 @@ const ADMIN_ID = 623203896;
 
 const bot = new Bot(token);
 
-// Список городов-миллионников
 const CITIES_LIST = [
     { name: "Москва", slug: "msk" },
     { name: "Санкт-Петербург", slug: "spb" },
     { name: "Казань", slug: "kzn" },
     { name: "Новосибирск", slug: "nsk" },
     { name: "Екатеринбург", slug: "ekb" },
-    { name: "Нижний Новгород", slug: "nnv" }
+    { name: "Нижний Новгород", slug: "nnv" },
+    { name: "Челябинск", slug: "che" }
 ];
 
 // --- 🗄️ БАЗА ДАННЫХ ---
@@ -27,56 +27,45 @@ mongoose.connect(mongoUri);
 
 const User = mongoose.model("User", new mongoose.Schema({
     userId: { type: Number, unique: true },
-    name: String, tariff: String, city: String,
-    isAllowed: { type: Boolean, default: false },
-    username: String,
-    regDate: { type: Date, default: Date.now }
+    username: String, city: String, tariff: String,
+    isAllowed: { type: Boolean, default: false }
 }));
 
 const Event = mongoose.model("Event", new mongoose.Schema({
-    city: String,
-    title: String,
-    address: String,
-    lat: Number,
-    lng: Number,
-    link: String,
-    expireAt: { type: Date, index: { expires: 0 } }
+    city: String, title: String, address: String, lat: Number, lng: Number, expireAt: Date
 }));
 
 bot.use(session({ initial: () => ({ step: "idle", tariff: null }) }));
 
-// --- 🌐 ПАРСЕР (Глобальный по всем городам) ---
+// --- 🌐 ГЛОБАЛЬНЫЙ ПАРСЕР ---
 async function updateAllCities() {
     let total = 0;
     for (const city of CITIES_LIST) {
         try {
             const nowUnix = Math.floor(Date.now() / 1000);
-            const url = `https://kudago.com/public-api/v1.4/events/?location=${city.slug}&fields=title,place,dates,site_url&page_size=35&expand=place&actual_since=${nowUnix}`;
+            const url = `https://kudago.com/public-api/v1.4/events/?location=${city.slug}&fields=title,place,dates&page_size=35&expand=place&actual_since=${nowUnix}`;
             const { data } = await axios.get(url);
             
-            const validEvents = data.results
-                .filter(item => item.place && item.place.coords)
-                .map(item => ({
-                    city: city.name,
-                    title: item.title.charAt(0).toUpperCase() + item.title.slice(1),
-                    address: item.place.address,
-                    lat: item.place.coords.lat,
-                    lng: item.place.coords.lon,
-                    link: item.site_url,
-                    expireAt: item.dates[0]?.end ? new Date(item.dates[0].end * 1000) : dayjs().add(6, 'hour').toDate()
-                }));
+            const events = data.results.filter(i => i.place && i.place.coords).map(i => ({
+                city: city.name,
+                title: i.title,
+                address: i.place.address,
+                lat: i.place.coords.lat,
+                lng: i.place.coords.lon,
+                expireAt: i.dates[0]?.end ? new Date(i.dates[0].end * 1000) : dayjs().add(5, 'hour').toDate()
+            }));
 
-            if (validEvents.length > 0) {
+            if (events.length > 0) {
                 await Event.deleteMany({ city: city.name });
-                await Event.insertMany(validEvents);
-                total += validEvents.length;
+                await Event.insertMany(events);
+                total += events.length;
             }
-        } catch (e) { console.error(`Ошибка города ${city.name}:`, e.message); }
+        } catch (e) { console.log(e.message); }
     }
     return total;
 }
 
-// --- 🚀 ОСНОВНАЯ ЛОГИКА БОТА ---
+// --- 🚀 ЛОГИКА БОТА ---
 bot.on("message:text", async (ctx) => {
     const text = ctx.msg.text;
     const userId = ctx.from.id;
@@ -85,103 +74,68 @@ bot.on("message:text", async (ctx) => {
     if (text === "/start") {
         if (!user) {
             ctx.session.step = "wait_tariff";
-            const kb = new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized().oneTime();
-            return ctx.reply("🚕 Добро пожаловать в HotMap Taxi! Выберите ваш рабочий тариф:", { reply_markup: kb });
+            return ctx.reply("🚕 Выберите тариф:", { reply_markup: new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized() });
         }
-        const menu = new Keyboard()
-            .text("Открыть карту 🔥").row()
-            .text("События сегодня 🎭").text("Цены на топливо ⛽️").row()
-            .text("Аналитика 📊").text("Мой профиль 👤").resized();
-        if (userId === ADMIN_ID) menu.row().text("Обновить карту 🔄");
-        return ctx.reply("🏠 Главное меню", { reply_markup: menu });
+        const menu = new Keyboard().text("Открыть карту 🔥").row().text("События сегодня 🎭").text("Мой профиль 👤").row().text("Аналитика 📊").text("Цены на топливо ⛽️").resized();
+        if (userId === ADMIN_ID) menu.row().text("Список водителей 📋").text("Обновить карту 🔄");
+        return ctx.reply("🏠 Меню", { reply_markup: menu });
     }
 
-    // 1. ОБНОВЛЕНИЕ (Админ)
     if (text === "Обновить карту 🔄" && userId === ADMIN_ID) {
-        await ctx.reply("📡 Запускаю сбор данных по всем миллионникам... Ждите.");
+        await ctx.reply("📡 Парсинг запущен...");
         const count = await updateAllCities();
-        return ctx.reply(`✅ Готово! Собрано точек: ${count}`);
+        return ctx.reply(`✅ Готово: ${count} точек.`);
     }
 
-    // 2. КАРТА
-    if (text === "Открыть карту 🔥") {
-        if (user?.isAllowed) {
-            const personalUrl = `${webAppUrl}?city=${encodeURIComponent(user.city || "Москва")}`;
-            return ctx.reply("📍 Ваша карта активных точек:", { 
-                reply_markup: new InlineKeyboard().webApp("Запустить HotMap", personalUrl) 
-            });
-        }
-        return ctx.reply("🚫 Доступ закрыт. Ожидайте подтверждения от администратора.");
-    }
-
-    // 3. СОБЫТИЯ
-    if (text === "События сегодня 🎭") {
-        const evs = await Event.find({ city: user?.city || "Москва" }).limit(10);
-        if (evs.length === 0) return ctx.reply("📍 Точек пока нет. Попробуйте обновить карту.");
-        let msg = `🎭 **Топ мест (${user?.city}):**\n\n`;
-        evs.forEach(e => msg += `🔥 ${e.title}\n📍 ${e.address}\n⏰ До ${dayjs(e.expireAt).format("HH:mm")}\n\n`);
+    if (text === "Список водителей 📋" && userId === ADMIN_ID) {
+        const drivers = await User.find().limit(20);
+        let msg = "👥 **Последние водители:**\n\n" + drivers.map(d => `${d.isAllowed ? '✅' : '⏳'} ${d.city} | @${d.username}`).join('\n');
         return ctx.reply(msg, { parse_mode: "Markdown" });
     }
 
-    // 4. МОЙ ПРОФИЛЬ
-    if (text === "Мой профиль 👤") {
-        const status = user?.isAllowed ? "✅ Активен" : "⏳ На проверке";
-        const info = `👤 **Ваш профиль:**\n\n🆔 ID: \`${userId}\`\n🚕 Тариф: ${user?.tariff}\n🏙 Город: ${user?.city}\n🚦 Статус: ${status}`;
-        return ctx.reply(info, { parse_mode: "Markdown" });
-    }
-
-    // 5. ТОПЛИВО (Демонстрация данных)
-    if (text === "Цены на топливо ⛽️") {
-        return ctx.reply(`⛽️ **Средние цены (${user?.city || "РФ"}):**\n\nАИ-95: 56.40₽\nАИ-92: 51.20₽\nДТ: 64.10₽\nГаз: 28.50₽\n\n_Обновлено: сегодня_`, { parse_mode: "Markdown" });
-    }
-
-    // 6. АНАЛИТИКА
     if (text === "Аналитика 📊") {
-        return ctx.reply("📈 Аналитика спроса временно недоступна. Мы собираем данные о заказах в вашем районе.");
+        const uCount = await User.countDocuments();
+        const eCount = await Event.countDocuments();
+        return ctx.reply(`📊 Всего юзеров: ${uCount}\n🔥 Всего точек: ${eCount}`);
     }
 
-    // --- РЕГИСТРАЦИЯ ---
+    if (text === "Мой профиль 👤") {
+        return ctx.reply(`👤 Профиль: @${user?.username}\n🏙 Город: ${user?.city}\n🚕 Тариф: ${user?.tariff}\n🚦 Доступ: ${user?.isAllowed ? "Есть" : "Нет"}`);
+    }
+
+    if (text === "Открыть карту 🔥") {
+        const url = `${webAppUrl}?city=${encodeURIComponent(user?.city || "Москва")}`;
+        return ctx.reply("Карта:", { reply_markup: new InlineKeyboard().webApp("Открыть", url) });
+    }
+
     if (ctx.session.step === "wait_tariff") {
         ctx.session.tariff = text;
         ctx.session.step = "idle";
         const kb = new InlineKeyboard();
-        CITIES_LIST.forEach(c => kb.text(c.name, `regcity_${c.name}`).row());
-        return ctx.reply("🏙 В каком городе работаете?", { reply_markup: kb });
+        CITIES_LIST.forEach(c => kb.text(c.name, `reg_${c.name}`).row());
+        return ctx.reply("Выберите город:", { reply_markup: kb });
     }
 });
 
 bot.on("callback_query:data", async (ctx) => {
-    const data = ctx.callbackQuery.data;
-    if (data.startsWith("regcity_")) {
-        const city = data.split("_")[1];
-        await User.findOneAndUpdate(
-            { userId: ctx.from.id },
-            {
-                userId: ctx.from.id,
-                username: ctx.from.username,
-                city: city,
-                tariff: ctx.session.tariff,
-                isAllowed: (ctx.from.id === ADMIN_ID)
-            },
-            { upsert: true }
-        );
-        await ctx.editMessageText(`✅ Регистрация завершена! Город: ${city}.\n\nНажмите /start, чтобы открыть меню.`);
+    if (ctx.callbackQuery.data.startsWith("reg_")) {
+        const city = ctx.callbackQuery.data.split("_")[1];
+        await User.findOneAndUpdate({ userId: ctx.from.id }, {
+            userId: ctx.from.id, username: ctx.from.username, city, tariff: ctx.session.tariff, isAllowed: (ctx.from.id === ADMIN_ID)
+        }, { upsert: true });
+        await ctx.editMessageText("✅ Регистрация завершена! Жми /start");
     }
 });
 
-// --- API СЕРВЕР ---
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'application/json');
-
     if (req.url.startsWith('/api/points')) {
         const url = new URL(req.url, `http://${req.headers.host}`);
-        const city = url.searchParams.get('city') || "Москва";
-        const events = await Event.find({ city });
+        const city = url.searchParams.get('city');
+        const filter = city ? { city } : {}; // Если города в запросе нет, отдаем ВСЕ точки
+        const events = await Event.find(filter);
         res.end(JSON.stringify(events));
-    } else {
-        res.end(JSON.stringify({ status: "ok" }));
-    }
+    } else { res.end(JSON.stringify({ status: "ok" })); }
 });
 
 bot.start();
