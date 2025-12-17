@@ -66,19 +66,22 @@ async function fetchFuelPrices(cityName) {
     } catch (e) { return null; }
 }
 
-// --- 🚀 ПАРСЕР КАРТЫ (БЫСТРЫЙ) ---
+// --- 🚀 ПАРСЕР КАРТЫ ---
 async function updateAllCities() {
-    const CITIES = ["msk", "spb", "kzn", "nsk", "ekb", "nnv", "che"];
+    const CITIES_MAP = {
+        "msk": "Москва", "spb": "Санкт-Петербург", "kzn": "Казань", 
+        "nsk": "Новосибирск", "ekb": "Екатеринбург", "nnv": "Нижний Новгород", "che": "Челябинск"
+    };
     const nowUnix = Math.floor(Date.now() / 1000);
     let total = 0;
-    for (const slug of CITIES) {
+    for (const [slug, cityName] of Object.entries(CITIES_MAP)) {
         try {
             const url = `https://kudago.com/public-api/v1.4/events/?location=${slug}&fields=title,place,dates&page_size=35&expand=place&actual_since=${nowUnix}`;
             const { data } = await axios.get(url);
             const events = data.results.filter(i => i.place && i.place.coords).map(i => ({
-                city: i.place.location === 'msk' ? 'Москва' : (i.place.location === 'spb' ? 'Санкт-Петербург' : i.place.location),
+                city: cityName,
                 title: i.title, address: i.place.address, lat: i.place.coords.lat, lng: i.place.coords.lon,
-                expireAt: dayjs().add(5, 'hour').toDate()
+                expireAt: dayjs().add(12, 'hour').toDate()
             }));
             if (events.length > 0) { await Event.insertMany(events); total += events.length; }
         } catch (e) {}
@@ -138,12 +141,13 @@ bot.on("callback_query:data", async (ctx) => {
     if (data.startsWith("manage_")) {
         const tid = data.split("_")[1];
         const u = await User.findOne({ userId: tid });
+        const exp = u.expiryDate ? dayjs(u.expiryDate).format("DD.MM.YYYY") : "—";
         const kb = new InlineKeyboard()
             .text("✅ Доступ (31д)", `allow_${tid}`)
             .text("🚫 Блок", `block_${tid}`).row()
             .text("🗑 Удалить", `delete_${tid}`).row()
             .text("⬅️ Назад", "back_to_list");
-        await ctx.editMessageText(`👤 ${u.name}\nТГ: @${u.username || '—'}\nГород: ${u.city}\nДоступ: ${u.isAllowed ? "Да" : "Нет"}`, { reply_markup: kb });
+        await ctx.editMessageText(`👤 ${u.name}\nТГ: @${u.username || '—'}\nГород: ${u.city}\nДоступ: ${u.isAllowed ? "Да" : "Нет"}\nИстекает: ${exp}`, { reply_markup: kb });
     }
 
     if (data === "back_to_list") {
@@ -176,7 +180,7 @@ bot.on("message:text", async (ctx) => {
 
     if (text === "Открыть карту 🔥") {
         if (userId === ADMIN_ID || (user?.isAllowed && user.expiryDate > new Date())) {
-            return ctx.reply("📍 Карта готова:", { reply_markup: new InlineKeyboard().webApp("Запустить", `${webAppUrl}?city=${user?.city || 'Москва'}`) });
+            return ctx.reply("📍 Карта готова:", { reply_markup: new InlineKeyboard().webApp("Запустить", `${webAppUrl}?city=${encodeURIComponent(user?.city || 'Москва')}`) });
         }
         return ctx.reply("🚫 Нет доступа.");
     }
@@ -186,7 +190,7 @@ bot.on("message:text", async (ctx) => {
         let f = await Fuel.findOne({ city: user.city });
         if (!f) f = await fetchFuelPrices(user.city);
         if (!f) return ctx.reply("❌ Нет данных.");
-        return ctx.reply(`⛽️ **Цены ${user.city}:**\n92: ${f.ai92}\n95: ${f.ai95}\nДТ: ${f.dt}\nГаз: ${f.gas}`, { parse_mode: "Markdown" });
+        return ctx.reply(`⛽️ **Цены ${user.city}:**\n92: ${f.ai92}р\n95: ${f.ai95}р\nДТ: ${f.dt}р\nГаз: ${f.gas}р`, { parse_mode: "Markdown" });
     }
 
     if (text === "Мой профиль 👤") {
@@ -212,7 +216,7 @@ bot.on("message:text", async (ctx) => {
         await ctx.reply("📡 Обновляю точки...");
         await Event.deleteMany({});
         const count = await updateAllCities();
-        return ctx.reply(`✅ Карта обновлена! Точек: ${count}`);
+        return ctx.reply(`✅ Карта обновлена! Добавлено точек: ${count}`);
     }
 
     if (ctx.session.step === "wait_tariff") {
@@ -224,4 +228,19 @@ bot.on("message:text", async (ctx) => {
 
 bot.catch((err) => console.error(err));
 bot.start();
-http.createServer((req, res) => res.end("OK")).listen(process.env.PORT || 8080);
+
+// --- API СЕРВЕР ДЛЯ КАРТЫ (ВОССТАНОВЛЕН) ---
+const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (req.url.startsWith('/api/points')) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const city = url.searchParams.get('city');
+        const filter = (city && city !== "undefined" && city !== "null") ? { city } : {};
+        const events = await Event.find(filter);
+        res.end(JSON.stringify(events));
+    } else {
+        res.end(JSON.stringify({ status: "running" }));
+    }
+});
+
+server.listen(process.env.PORT || 8080);
