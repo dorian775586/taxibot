@@ -12,160 +12,175 @@ const ADMIN_ID = 623203896;
 
 const bot = new Bot(token);
 
-bot.catch((err) => {
-    console.error(`🔴 Ошибка бота:`, err.error);
-});
-
 // --- 🗄️ БАЗА ДАННЫХ ---
-mongoose.connect(mongoUri).then(() => console.log("✅ MongoDB подключена"));
+mongoose.connect(mongoUri).then(() => console.log("✅ База подключена"));
 
-const User = mongoose.model("User", new mongoose.Schema({
+const userSchema = new mongoose.Schema({
     userId: { type: Number, unique: true },
-    username: String, 
-    city: String, 
-    tariff: String,
+    name: String, 
+    tariff: String, 
+    city: String,
     isAllowed: { type: Boolean, default: false },
+    expiryDate: { type: Date, default: null }, 
+    username: String,
     regDate: { type: Date, default: Date.now }
-}));
-
-const Event = mongoose.model("Event", new mongoose.Schema({
-    city: String, title: String, address: String, lat: Number, lng: Number, expireAt: Date
-}));
+});
+const User = mongoose.model("User", userSchema);
 
 bot.use(session({ initial: () => ({ step: "idle", tariff: null }) }));
 
-// --- 🚀 УСКОРЕННЫЙ ПАРСЕР ---
-async function updateAllCities() {
-    const CITIES_LIST = [
-        { name: "Москва", slug: "msk" }, { name: "Санкт-Петербург", slug: "spb" },
-        { name: "Казань", slug: "kzn" }, { name: "Новосибирск", slug: "nsk" },
-        { name: "Екатеринбург", slug: "ekb" }, { name: "Нижний Новгород", slug: "nnv" },
-        { name: "Челябинск", slug: "che" }
-    ];
-    const nowUnix = Math.floor(Date.now() / 1000);
-    const promises = CITIES_LIST.map(async (city) => {
-        try {
-            const url = `https://kudago.com/public-api/v1.4/events/?location=${city.slug}&fields=title,place,dates&page_size=35&expand=place&actual_since=${nowUnix}`;
-            const { data } = await axios.get(url, { timeout: 10000 });
-            const events = data.results.filter(i => i.place && i.place.coords).map(i => ({
-                city: city.name,
-                title: i.title.charAt(0).toUpperCase() + i.title.slice(1),
-                address: i.place.address,
-                lat: i.place.coords.lat,
-                lng: i.place.coords.lon,
-                expireAt: i.dates[0]?.end ? new Date(i.dates[0].end * 1000) : dayjs().add(5, 'hour').toDate()
-            }));
-            if (events.length > 0) {
-                await Event.deleteMany({ city: city.name });
-                await Event.insertMany(events);
-                return events.length;
-            }
-            return 0;
-        } catch (e) { return 0; }
+const popularCities = ["Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань", "Челябинск"];
+
+// --- 🛠️ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+function getCitiesKeyboard() {
+    const kb = new InlineKeyboard();
+    popularCities.forEach((city, i) => {
+        kb.text(city, `regcity_${city}`);
+        if ((i + 1) % 2 === 0) kb.row();
     });
-    const results = await Promise.all(promises);
-    return results.reduce((a, b) => a + b, 0);
+    return kb;
 }
 
-// --- 🤖 ЛОГИКА ---
-bot.on("message:text", async (ctx) => {
-    const text = ctx.msg.text;
-    const userId = ctx.from.id;
-    const user = await User.findOne({ userId });
+// --- 🚀 ЛОГИКА БОТА ---
 
-    if (text === "/start") {
-        if (!user) {
-            ctx.session.step = "wait_tariff";
-            return ctx.reply("🚕 Выберите ваш тариф:", { 
-                reply_markup: new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized().oneTime() 
-            });
-        }
-        const menu = new Keyboard().text("Открыть карту 🔥").row().text("События сегодня 🎭").text("Цены на топливо ⛽️").row().text("Аналитика 📊").text("Мой профиль 👤").resized();
-        if (userId === ADMIN_ID) menu.row().text("Список водителей 📋").text("Обновить карту 🔄");
-        return ctx.reply("🏠 Главное меню", { reply_markup: menu });
-    }
-
-    if (text === "/clean_database" && userId === ADMIN_ID) {
-        await User.deleteMany({ userId: { $ne: ADMIN_ID } });
-        return ctx.reply("🧹 База очищена.");
-    }
-
-    if (text === "Обновить карту 🔄" && userId === ADMIN_ID) {
-        const loadingMsg = await ctx.reply("📡 Обновляю данные...");
-        const count = await updateAllCities();
-        return ctx.api.editMessageText(ctx.chat.id, loadingMsg.message_id, `✅ Готово! Добавлено ${count} точек.`);
-    }
-
-    // --- ИСПРАВЛЕННЫЙ СПИСОК (HTML MODE) ---
-    if (text === "Список водителей 📋" && userId === ADMIN_ID) {
-        const drivers = await User.find().sort({ regDate: -1 }).lean();
-        if (!drivers.length) return ctx.reply("📭 Водителей нет.");
-
-        let msg = `<b>👥 Водителей в базе: ${drivers.length}</b>\n\n`;
-        drivers.forEach((d, i) => {
-            const date = dayjs(d.regDate).format("DD.MM HH:mm");
-            const userLink = d.username ? `@${d.username}` : `ID:${d.userId}`;
-            // Используем HTML вместо Markdown, чтобы подчеркивания не ломали текст
-            const line = `${i+1}. ${date} | ${d.city || '??'} | <code>${userLink}</code>\n`;
-            
-            if ((msg + line).length > 4000) {
-                ctx.reply(msg, { parse_mode: "HTML" });
-                msg = "";
-            }
-            msg += line;
-        });
-        return ctx.reply(msg, { parse_mode: "HTML" });
-    }
-
-    if (text === "Открыть карту 🔥") {
-        if (!user?.isAllowed && userId !== ADMIN_ID) return ctx.reply("🚫 Доступ не подтвержден.");
-        const url = `${webAppUrl}?city=${encodeURIComponent(user?.city || "Москва")}`;
-        return ctx.reply("📍 Карта открыта:", { reply_markup: new InlineKeyboard().webApp("Открыть карту", url) });
-    }
-
-    if (text === "Аналитика 📊") {
-        const [uCount, eCount] = await Promise.all([User.countDocuments(), Event.countDocuments()]);
-        return ctx.reply(`📊 <b>Статистика:</b>\n• Водителей: ${uCount}\n• Точек: ${eCount}`, { parse_mode: "HTML" });
-    }
-
-    if (text === "Мой профиль 👤") {
-        const status = (user?.isAllowed || userId === ADMIN_ID) ? "Одобрен" : "На проверке";
-        return ctx.reply(`👤 <b>Профиль:</b>\n\n🆔 ID: <code>${userId}</code>\n🏙 Город: ${user?.city || "—"}\n🚦 Статус: ${status}`, { parse_mode: "HTML" });
-    }
-
-    if (text === "Цены на топливо ⛽️") {
-        return ctx.reply(`⛽️ <b>Средние цены:</b>\n\n95-й: ~56.4₽\n92-й: ~51.2₽`, { parse_mode: "HTML" });
-    }
-
-    if (ctx.session.step === "wait_tariff") {
-        ctx.session.tariff = text;
-        ctx.session.step = "idle";
-        const kb = new InlineKeyboard();
-        ["Москва", "Санкт-Петербург", "Казань", "Новосибирск", "Екатеринбург", "Нижний Новгород"].forEach(c => kb.text(c, `reg_${c}`).row());
-        return ctx.reply("🏙 Выберите ваш город:", { reply_markup: kb });
+bot.command("start", async (ctx) => {
+    let user = await User.findOne({ userId: ctx.from.id });
+    if (!user) {
+        ctx.session.step = "wait_tariff";
+        const kb = new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized().oneTime();
+        await ctx.reply("🚕 Добро пожаловать! Выберите ваш рабочий тариф:", { reply_markup: kb });
+    } else {
+        const menu = new Keyboard().text("Открыть карту 🔥").row().text("Мой профиль 👤").resized();
+        if (ctx.from.id === ADMIN_ID) menu.row().text("Список водителей 📋");
+        
+        const status = user.isAllowed ? "🟢 Доступ открыт" : "🔴 Ожидает одобрения";
+        await ctx.reply(`🏠 **Главное меню**\nВаш статус: ${status}`, { reply_markup: menu, parse_mode: "Markdown" });
     }
 });
 
 bot.on("callback_query:data", async (ctx) => {
-    if (ctx.callbackQuery.data.startsWith("reg_")) {
-        const city = ctx.callbackQuery.data.split("_")[1];
-        await User.findOneAndUpdate({ userId: ctx.from.id }, {
-            userId: ctx.from.id, username: ctx.from.username, city, tariff: ctx.session.tariff, isAllowed: (ctx.from.id === ADMIN_ID)
-        }, { upsert: true });
-        await ctx.editMessageText(`✅ Регистрация завершена! Нажмите /start`);
+    const data = ctx.callbackQuery.data;
+
+    // Регистрация города
+    if (data.startsWith("regcity_")) {
+        const city = data.split("_")[1];
+        const count = await User.countDocuments();
+        const user = new User({
+            userId: ctx.from.id,
+            username: ctx.from.username,
+            tariff: ctx.session.tariff,
+            city: city,
+            name: `Водитель #${count + 1}`,
+            isAllowed: false
+        });
+        await user.save();
+        ctx.session.step = "idle";
+        await ctx.editMessageText(`✅ Регистрация завершена!\n👤 Ваш позывной: <b>${user.name}</b>\n🏙 Город: <b>${city}</b>\n\n🚦 Ваша заявка будет одобрена администратором в ближайшее время. Ожидайте уведомления.`, { parse_mode: "HTML" });
+        await bot.api.sendMessage(ADMIN_ID, `🔔 <b>Новая заявка:</b> ${user.name}\n📍 Город: ${city}\n💰 Тариф: ${user.tariff}`, { parse_mode: "HTML" });
+    }
+
+    // Управление водителем (Админка)
+    if (data.startsWith("manage_")) {
+        const tid = data.split("_")[1];
+        const u = await User.findOne({ userId: tid });
+        if (!u) return ctx.answerCallbackQuery("Пользователь не найден");
+
+        const exp = u.expiryDate ? dayjs(u.expiryDate).format("DD.MM.YYYY") : "—";
+        const userLink = u.username ? `https://t.me/${u.username}` : `tg://user?id=${u.userId}`;
+
+        const kb = new InlineKeyboard()
+            .text("✅ Доступ (31д)", `allow_${tid}`)
+            .text("🚫 Блок", `block_${tid}`).row()
+            .text("🗑 Удалить профиль", `delete_${tid}`).row()
+            .text("⬅️ Назад к списку", "back_to_list");
+
+        await ctx.editMessageText(
+            `👤 <b>${u.name}</b>\n` +
+            `🔗 Профиль: <a href="${userLink}">${u.username || 'Ссылка'}</a>\n` +
+            `🏙 Город: ${u.city}\n` +
+            `💰 Тариф: ${u.tariff}\n` +
+            `🔓 Доступ: ${u.isAllowed ? "✅ Да" : "❌ Нет"}\n` +
+            `⏳ Истекает: ${exp}`, 
+            { reply_markup: kb, parse_mode: "HTML" }
+        );
+    }
+
+    if (data === "back_to_list") {
+        const users = await User.find().sort({ regDate: -1 });
+        const kb = new InlineKeyboard();
+        users.forEach(u => { kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name}`, `manage_${u.userId}`).row(); });
+        await ctx.editMessageText("👥 Список водителей:", { reply_markup: kb });
+    }
+
+    // Выдача доступа / Блок
+    if (data.startsWith("allow_") || data.startsWith("block_")) {
+        const [act, tid] = data.split("_");
+        const isAllow = act === "allow";
+        const date = isAllow ? dayjs().add(31, 'day').toDate() : null;
+
+        await User.findOneAndUpdate({ userId: tid }, { isAllowed: isAllow, expiryDate: date });
+        
+        try {
+            await bot.api.sendMessage(tid, isAllow ? "✅ Администратор одобрил ваш доступ на 31 день! Теперь карта доступна." : "❌ Ваш доступ был временно ограничен администратором.");
+        } catch(e) {}
+        
+        await ctx.answerCallbackQuery("Статус обновлен");
+        // Возвращаемся в профиль пользователя
+        ctx.callbackQuery.data = `manage_${tid}`;
+        return bot.on("callback_query:data")(ctx); 
+    }
+
+    if (data.startsWith("delete_")) {
+        const tid = data.split("_")[1];
+        await User.findOneAndDelete({ userId: tid });
+        await ctx.answerCallbackQuery("Профиль удален");
+        await ctx.editMessageText("🗑 Профиль удален.", { reply_markup: new InlineKeyboard().text("⬅️ К списку", "back_to_list") });
     }
 });
 
-const server = http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    if (req.url.startsWith('/api/points')) {
-        const url = new URL(req.url, `http://${req.headers.host}`);
-        const city = url.searchParams.get('city');
-        const filter = (city && city !== "undefined" && city !== "null") ? { city } : {};
-        const events = await Event.find(filter);
-        res.end(JSON.stringify(events));
-    } else res.end(JSON.stringify({ status: "ok" }));
+bot.on("message:text", async (ctx) => {
+    const text = ctx.msg.text;
+    const userId = ctx.from.id;
+
+    if (text === "Открыть карта 🔥" || text === "Открыть карту 🔥") {
+        const u = await User.findOne({ userId });
+        const now = new Date();
+        const hasAccess = userId === ADMIN_ID || (u?.isAllowed && u.expiryDate > now);
+
+        if (hasAccess) {
+            return ctx.reply("📍 Карта горячих точек готова к запуску!", { 
+                reply_markup: new InlineKeyboard().webApp("Запустить HotMap", `${webAppUrl}?city=${encodeURIComponent(u?.city || 'Москва')}`) 
+            });
+        }
+        return ctx.reply("🚫 Доступ к карте закрыт. Ваша заявка либо на проверке, либо срок доступа истек.");
+    }
+
+    if (text === "Мой профиль 👤") {
+        const u = await User.findOne({ userId });
+        if (!u) return;
+        const exp = u.expiryDate ? dayjs(u.expiryDate).format("DD.MM.YYYY") : "Не активен";
+        return ctx.reply(`👤 <b>Ваш профиль:</b>\n🆔 ID: <code>${u.name}</code>\n📍 Город: ${u.city}\n🚖 Тариф: ${u.tariff}\n⏳ Доступ до: ${exp}`, { parse_mode: "HTML" });
+    }
+
+    if (text === "Список водителей 📋" && userId === ADMIN_ID) {
+        const users = await User.find().sort({ regDate: -1 }).limit(40);
+        if (users.length === 0) return ctx.reply("В базе пока нет водителей.");
+        const kb = new InlineKeyboard();
+        users.forEach(u => { kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name}`, `manage_${u.userId}`).row(); });
+        return ctx.reply("👥 <b>Список водителей:</b>\n<i>Нажмите на водителя для управления</i>", { reply_markup: kb, parse_mode: "HTML" });
+    }
+
+    // Выбор города после тарифа
+    if (ctx.session.step === "wait_tariff") {
+        ctx.session.tariff = text;
+        ctx.session.step = "idle";
+        await ctx.reply("🏙 Отлично! Теперь выберите ваш рабочий город:", { reply_markup: getCitiesKeyboard() });
+    }
 });
 
-bot.start();
-server.listen(process.env.PORT || 8080);
+bot.catch((err) => console.error("!!! ОШИБКА !!!", err));
+
+bot.start({ drop_pending_updates: true });
+
+// Простая заглушка для Render
+http.createServer((req, res) => { res.end("OK"); }).listen(process.env.PORT || 8080);
