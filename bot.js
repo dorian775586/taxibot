@@ -30,7 +30,7 @@ const Event = mongoose.model("Event", new mongoose.Schema({
     lat: Number,
     lng: Number,
     link: String,
-    expireAt: { type: Date, index: { expires: 0 } } // TTL-индекс для авто-удаления
+    expireAt: { type: Date, index: { expires: 0 } } // Точка сама удалится из базы по истечении времени
 }));
 
 const Order = mongoose.model("Order", new mongoose.Schema({
@@ -54,7 +54,7 @@ async function getCoords(address, city) {
         if (data && data.length > 0) {
             return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
         }
-    } catch (e) { console.error("Геокодинг провален:", e.message); }
+    } catch (e) { console.error("Геокодинг не удался:", e.message); }
     return null;
 }
 
@@ -64,15 +64,15 @@ async function updateEvents(city) {
     const slug = slugs[city] || "msk";
     try {
         const nowUnix = Math.floor(Date.now() / 1000);
+        // Запрос 20 актуальных событий
         const url = `https://kudago.com/public-api/v1.4/events/?location=${slug}&fields=title,place,dates,site_url&page_size=20&expand=place&actual_since=${nowUnix}`;
         const { data } = await axios.get(url);
         
         const validEvents = [];
-        const todayEnd = dayjs().endOf('day').unix();
 
         for (const item of data.results) {
             if (item.place && item.place.address) {
-                // Ищем время окончания на сегодня или ставим конец дня
+                // Ищем сеанс, который заканчивается позже всего сегодня
                 const session = item.dates.find(d => d.end >= nowUnix);
                 const expireAt = session ? new Date(session.end * 1000) : dayjs().endOf('day').toDate();
 
@@ -88,8 +88,8 @@ async function updateEvents(city) {
                         expireAt: expireAt
                     });
                 }
-                // Небольшая пауза для Nominatim (чтобы не забанили)
-                await new Promise(r => setTimeout(r, 700));
+                // Задержка, чтобы не заблокировал геокодер
+                await new Promise(r => setTimeout(r, 800));
             }
         }
 
@@ -98,29 +98,11 @@ async function updateEvents(city) {
             await Event.insertMany(validEvents);
             return validEvents.length;
         }
-    } catch (e) { console.error("Ошибка обновления событий:", e.message); }
+    } catch (e) { console.error("Ошибка парсера:", e.message); }
     return 0;
 }
 
-// --- ⛽️ ПАРСЕР ТОПЛИВА ---
-async function fetchFuelPrices(cityName) {
-    try {
-        const cityTranslit = { "Москва": "moskva", "Санкт-Петербург": "sankt-peterburg", "Казань": "kazan" };
-        const slug = cityTranslit[cityName] || "moskva";
-        const { data } = await axios.get(`https://fuelprices.ru/${slug}`, { timeout: 7000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const $ = cheerio.load(data);
-        const p = [];
-        $(".price_table tr td").each((i, el) => p.push($(el).text().trim()));
-        if (p.length > 5) {
-            const res = { city: cityName, ai92: p[1], ai95: p[3], dt: p[5], gas: p[7], lastUpdate: new Date() };
-            await Fuel.findOneAndUpdate({ city: cityName }, res, { upsert: true });
-            return res;
-        }
-        return null;
-    } catch (e) { return null; }
-}
-
-// --- 🚀 ОБРАБОТКА ТЕКСТА ---
+// --- 🚀 ОСНОВНАЯ ЛОГИКА БОТА ---
 bot.on("message:text", async (ctx) => {
     const text = ctx.msg.text;
     const userId = ctx.from.id;
@@ -129,97 +111,92 @@ bot.on("message:text", async (ctx) => {
         let user = await User.findOne({ userId });
         if (!user) {
             ctx.session.step = "wait_tariff";
-            return ctx.reply("🚕 Выберите тариф:", { reply_markup: new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized().oneTime() });
+            const kb = new Keyboard().text("Эконом").text("Комфорт").row().text("Комфорт+").text("Элит").resized().oneTime();
+            return ctx.reply("🚕 Добро пожаловать! Выберите тариф:", { reply_markup: kb });
         }
         const menu = new Keyboard().text("Открыть карту 🔥").row().text("События сегодня 🎭").text("Цены на топливо ⛽️").row().text("Аналитика 📊").text("Мой профиль 👤").resized();
-        if (userId === ADMIN_ID) menu.row().text("Список водителей 📋").text("Заявки 📂").text("Обновить карту 🔄");
+        if (userId === ADMIN_ID) menu.row().text("Список водителей 📋").text("Обновить карту 🔄");
         return ctx.reply("🏠 Главное меню", { reply_markup: menu });
     }
 
     if (text === "Обновить карту 🔄" && userId === ADMIN_ID) {
-        await ctx.reply("⏳ Парсинг 20 событий и геокодинг запущен... (около 1 мин)");
-        const c1 = await updateEvents("Москва");
-        const c2 = await updateEvents("Санкт-Петербург");
-        return ctx.reply(`✅ Готово!\nМосква: ${c1} точек\nПитер: ${c2} точек.`);
+        await ctx.reply("⏳ Начинаю сбор 20 событий для Москвы и СПБ. Это займет около 1-2 минут...");
+        const mskCount = await updateEvents("Москва");
+        const spbCount = await updateEvents("Санкт-Петербург");
+        return ctx.reply(`✅ Карта обновлена!\n📍 Москва: ${mskCount} точек\n📍 Питер: ${spbCount} точек.`);
+    }
+
+    if (text === "Открыть карту 🔥") {
+        const u = await User.findOne({ userId });
+        if (u?.isAllowed) {
+            // Передаем город пользователя в URL WebApp
+            const personalUrl = `${webAppUrl}?city=${encodeURIComponent(u.city || "Москва")}`;
+            return ctx.reply("📍 Ваша карта активных точек:", { 
+                reply_markup: new InlineKeyboard().webApp("Открыть карту", personalUrl) 
+            });
+        }
+        return ctx.reply("🚫 У вас пока нет доступа к карте. Обратитесь к администратору.");
     }
 
     if (text === "События сегодня 🎭") {
         const u = await User.findOne({ userId });
         const evs = await Event.find({ city: u?.city || "Москва" }).limit(10);
-        if (evs.length === 0) return ctx.reply("📍 На карте пока пусто.");
-        let m = "🔥 **Актуальные точки:**\n\n";
-        evs.forEach(e => m += `• ${e.title}\n⏰ До: ${dayjs(e.expireAt).format("HH:mm")}\n\n`);
-        return ctx.reply(m, { parse_mode: "Markdown" });
+        if (evs.length === 0) return ctx.reply("📍 Сейчас нет активных мероприятий на карте.");
+        let msg = `🎭 **Мероприятия в г. ${u.city}:**\n\n`;
+        evs.forEach(e => msg += `• ${e.title}\n⏰ Развоз до: ${dayjs(e.expireAt).format("HH:mm")}\n\n`);
+        return ctx.reply(msg, { parse_mode: "Markdown" });
     }
 
-    if (text === "Цены на топливо ⛽️") {
-        const u = await User.findOne({ userId });
-        const f = await fetchFuelPrices(u?.city || "Москва");
-        if (!f) return ctx.reply("❌ Ошибка связи с сервером цен.");
-        return ctx.reply(`⛽️ **${u.city}:**\n92: ${f.ai92}р\n95: ${f.ai95}р\nДТ: ${f.dt}р`, { parse_mode: "Markdown" });
-    }
-
-    if (text === "Аналитика 📊") {
-        const txt = "Аналитика вашего аккаунта ЯндексGo на теневой бан и чек.\n💰 Цена: 2490 ₽";
-        return ctx.reply(txt, { reply_markup: new InlineKeyboard().text("✅ Согласен", "analyt_start").text("❌ Отмена", "idle") });
-    }
-
-    if (ctx.session.step === "analyt_wait_car") {
-        ctx.session.carNumber = text;
-        ctx.session.step = "analyt_wait_phone";
-        return ctx.reply("📱 Введите номер телефона:");
-    }
-
-    if (ctx.session.step === "analyt_wait_phone") {
-        await new Order({ userId, username: ctx.from.username, carNumber: ctx.session.carNumber, phone: text }).save();
-        ctx.session.step = "idle";
-        await ctx.reply("✅ Заявка отправлена!");
-        return bot.api.sendMessage(ADMIN_ID, `🔥 Заявка на аналитику от @${ctx.from.username}\nТел: ${text}`);
-    }
-
+    // Обработка регистрации
     if (ctx.session.step === "wait_tariff") {
         ctx.session.tariff = text;
         ctx.session.step = "idle";
         const kb = new InlineKeyboard();
         ["Москва", "Санкт-Петербург", "Казань"].forEach(c => kb.text(c, `regcity_${c}`).row());
-        return ctx.reply("🏙 Ваш город:", { reply_markup: kb });
-    }
-
-    if (text === "Открыть карту 🔥") {
-        const u = await User.findOne({ userId });
-        if (u?.isAllowed) return ctx.reply("📍 Карта:", { reply_markup: new InlineKeyboard().webApp("Открыть", webAppUrl) });
-        return ctx.reply("🚫 Доступ закрыт.");
+        return ctx.reply("🏙 Выберите ваш город:", { reply_markup: kb });
     }
 });
 
-// --- 🖱 ОБРАБОТКА КНОПОК ---
 bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
     if (data.startsWith("regcity_")) {
         const city = data.split("_")[1];
-        await new User({ userId: ctx.from.id, city, tariff: ctx.session.tariff, username: ctx.from.username, isAllowed: (ctx.from.id === ADMIN_ID) }).save();
-        await ctx.editMessageText("✅ Регистрация завершена! Напишите /start");
-    }
-    if (data === "analyt_start") {
-        ctx.session.step = "analyt_wait_car";
-        await ctx.editMessageText("🔢 Введите госномер авто:");
+        const user = new User({
+            userId: ctx.from.id, 
+            username: ctx.from.username,
+            city: city,
+            tariff: ctx.session.tariff,
+            name: `Водитель #${Math.floor(Math.random()*9000)+1000}`,
+            isAllowed: (ctx.from.id === ADMIN_ID)
+        });
+        await user.save();
+        await ctx.editMessageText(`✅ Регистрация завершена! Ваш город: ${city}. Нажмите /start для входа.`);
     }
 });
 
-// --- 🌐 API СЕРВЕР ДЛЯ WEBAPP КАРТЫ ---
+// --- 🌐 API СЕРВЕР ДЛЯ КАРТЫ ---
 const server = http.createServer(async (req, res) => {
+    // Разрешаем запросы с любого домена (CORS)
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Content-Type', 'application/json');
 
     if (req.url.startsWith('/api/points')) {
         const url = new URL(req.url, `http://${req.headers.host}`);
         const city = url.searchParams.get('city') || "Москва";
-        const events = await Event.find({ city });
-        res.end(JSON.stringify(events));
+        
+        try {
+            const events = await Event.find({ city });
+            res.end(JSON.stringify(events));
+        } catch (e) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: "DB Error" }));
+        }
     } else {
-        res.end(JSON.stringify({ status: "running" }));
+        res.end(JSON.stringify({ status: "ok", bot: "active" }));
     }
 });
 
+// Запуск
 bot.start();
 server.listen(process.env.PORT || 8080);
