@@ -96,20 +96,27 @@ bot.on("message:text", async (ctx) => {
         }
 
         // 1. ОБНОВИТЬ КАРТУ (АДМИН)
-        if (text === "Обновить карту 🔄" && userId === ADMIN_ID) {
-            await ctx.reply("📡 Сбор данных по всем городам запущен... Это займет около 30 сек.");
+        if (text === "Обновить карту 🔄") {
+            if (userId !== ADMIN_ID) return ctx.reply(`🚫 Отказано. Ваш ID: ${userId}`);
+            await ctx.reply("📡 Сбор данных по всем городам запущен...");
             const count = await updateAllCities();
             return ctx.reply(`✅ Карта обновлена! Всего точек: ${count}`);
         }
 
         // 2. СПИСОК ВОДИТЕЛЕЙ (АДМИН)
-        if (text === "Список водителей 📋" && userId === ADMIN_ID) {
-            const drivers = await User.find().limit(40).sort({ regDate: -1 });
-            if (!drivers.length) return ctx.reply("Водителей пока нет.");
-            let msg = "👥 **Последние регистрации:**\n\n";
-            drivers.forEach(d => {
-                msg += `${d.isAllowed ? '✅' : '⏳'} ${d.city} | ${d.tariff} | @${d.username || 'id'+d.userId}\n`;
+        if (text === "Список водителей 📋") {
+            if (userId !== ADMIN_ID) return ctx.reply(`🚫 Отказано. Ваш ID: ${userId}`);
+            
+            const drivers = await User.find().limit(50).sort({ regDate: -1 }).lean();
+            if (!drivers.length) return ctx.reply("📭 Водителей в базе пока нет.");
+            
+            let msg = "👥 **Список водителей (последние 50):**\n\n";
+            drivers.forEach((d, i) => {
+                const status = d.isAllowed ? '✅' : '⏳';
+                const username = d.username ? `@${d.username}` : `id:${d.userId}`;
+                msg += `${i+1}. ${status} ${d.city || '??'} | ${d.tariff || '??'} | ${username}\n`;
             });
+            
             return ctx.reply(msg, { parse_mode: "Markdown" });
         }
 
@@ -117,26 +124,26 @@ bot.on("message:text", async (ctx) => {
         if (text === "Открыть карту 🔥") {
             if (user?.isAllowed || userId === ADMIN_ID) {
                 const url = `${webAppUrl}?city=${encodeURIComponent(user?.city || "Москва")}`;
-                return ctx.reply("📍 Нажмите кнопку ниже, чтобы открыть карту:", {
-                    reply_markup: new InlineKeyboard().webApp("Запустить HotMap", url)
+                return ctx.reply("📍 Карта горячих точек:", {
+                    reply_markup: new InlineKeyboard().webApp("Открыть HotMap", url)
                 });
             }
-            return ctx.reply("🚫 Доступ к карте ограничен. Обратитесь к @bogat777 для подтверждения профиля.");
+            return ctx.reply("🚫 Доступ ограничен. Напишите @bogat777");
         }
 
         // 4. СОБЫТИЯ
         if (text === "События сегодня 🎭") {
             const events = await Event.find({ city: user?.city || "Москва" }).limit(10);
-            if (!events.length) return ctx.reply("📍 В вашем городе пока нет активных точек.");
-            let msg = `🎭 **Мероприятия (${user?.city}):**\n\n`;
-            events.forEach(e => msg += `🔥 ${e.title}\n📍 ${e.address}\n⏰ До ${dayjs(e.expireAt).format("HH:mm")}\n\n`);
+            if (!events.length) return ctx.reply("📍 Активных точек в вашем городе не найдено.");
+            let msg = `🎭 **Мероприятия (${user?.city || "Москва"}):**\n\n`;
+            events.forEach(e => msg += `🔥 ${e.title}\n⏰ До ${dayjs(e.expireAt).format("HH:mm")}\n\n`);
             return ctx.reply(msg, { parse_mode: "Markdown" });
         }
 
         // 5. МОЙ ПРОФИЛЬ
         if (text === "Мой профиль 👤") {
-            const status = (user?.isAllowed || userId === ADMIN_ID) ? "✅ Активен" : "⏳ Ожидает проверки";
-            const info = `👤 **Ваш профиль:**\n\n🆔 ID: \`${userId}\`\n🚕 Тариф: ${user?.tariff || "Не выбран"}\n🏙 Город: ${user?.city || "Не выбран"}\n🚦 Доступ: ${status}`;
+            const status = (user?.isAllowed || userId === ADMIN_ID) ? "✅ Доступ разрешен" : "⏳ На проверке";
+            const info = `👤 **Профиль:**\n\n🆔 ID: \`${userId}\`\n🏙 Город: ${user?.city || "Не указан"}\n🚕 Тариф: ${user?.tariff || "Не выбран"}\n🚦 Статус: ${status}`;
             return ctx.reply(info, { parse_mode: "Markdown" });
         }
 
@@ -144,12 +151,12 @@ bot.on("message:text", async (ctx) => {
         if (text === "Аналитика 📊") {
             const uCount = await User.countDocuments();
             const eCount = await Event.countDocuments();
-            return ctx.reply(`📊 **Статистика HotMap:**\n\n👥 Водителей в системе: ${uCount}\n🔥 Точек на карте: ${eCount}\n🏙 Городов: ${CITIES_LIST.length}`);
+            return ctx.reply(`📊 **Статистика:**\n\n👥 Водителей: ${uCount}\n🔥 Точек: ${eCount}\n🏙 Городов: ${CITIES_LIST.length}`);
         }
 
         // 7. ТОПЛИВО
         if (text === "Цены на топливо ⛽️") {
-            return ctx.reply(`⛽️ **Средние цены (${user?.city || "РФ"}):**\n\nАИ-95: 56.40₽\nАИ-92: 51.20₽\nДТ: 64.10₽\nГаз: 28.50₽\n\n_Данные обновляются раз в сутки_`, { parse_mode: "Markdown" });
+            return ctx.reply(`⛽️ **Средние цены:**\n\nАИ-95: 56.40₽\nАИ-92: 51.20₽\nДТ: 64.10₽\nГаз: 28.50₽`);
         }
 
         // --- РЕГИСТРАЦИЯ ---
@@ -158,12 +165,12 @@ bot.on("message:text", async (ctx) => {
             ctx.session.step = "idle";
             const kb = new InlineKeyboard();
             CITIES_LIST.forEach(c => kb.text(c.name, `regcity_${c.name}`).row());
-            return ctx.reply("🏙 В каком городе работаете?", { reply_markup: kb });
+            return ctx.reply("🏙 Выберите ваш основной город:", { reply_markup: kb });
         }
 
     } catch (err) {
-        console.error("ОШИБКА БОТА:", err);
-        return ctx.reply("⚠️ Произошла внутренняя ошибка. Попробуйте нажать /start");
+        console.error("ОШИБКА:", err);
+        return ctx.reply("⚠️ Ошибка. Нажмите /start");
     }
 });
 
@@ -177,7 +184,7 @@ bot.on("callback_query:data", async (ctx) => {
             tariff: ctx.session.tariff,
             isAllowed: (ctx.from.id === ADMIN_ID)
         }, { upsert: true });
-        await ctx.editMessageText(`✅ Регистрация завершена!\n📍 Город: ${city}\n🚕 Тариф: ${ctx.session.tariff}\n\nНажмите /start для входа в меню.`);
+        await ctx.editMessageText(`✅ Готово! Город: ${city}, Тариф: ${ctx.session.tariff}. Нажмите /start`);
     }
 });
 
@@ -193,7 +200,7 @@ const server = http.createServer(async (req, res) => {
         const events = await Event.find(filter);
         res.end(JSON.stringify(events));
     } else {
-        res.end(JSON.stringify({ status: "active" }));
+        res.end(JSON.stringify({ status: "ok" }));
     }
 });
 
