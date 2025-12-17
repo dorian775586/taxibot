@@ -1,4 +1,4 @@
-const { Bot, Keyboard, InlineKeyboard, session } = require("grammy");
+const { Bot, Keyboard, InlineKeyboard, session, GrammyError, HttpError } = require("grammy");
 const mongoose = require("mongoose");
 const http = require("http");
 const dayjs = require("dayjs");
@@ -25,7 +25,10 @@ const carBrands = {
 };
 
 // --- 🗄️ БАЗА ДАННЫХ ---
-mongoose.connect(mongoUri);
+mongoose.connect(mongoUri)
+    .then(() => console.log("[DB] Успешное подключение к MongoDB"))
+    .catch(err => console.error("[DB] Ошибка подключения:", err));
+
 const userSchema = new mongoose.Schema({
     userId: { type: Number, unique: true },
     name: String, car: String, tariff: String, city: String,
@@ -59,6 +62,7 @@ function getBrandsKeyboard() {
 }
 
 async function showMainMenu(ctx, user) {
+    console.log(`[MENU] Вызов главного меню для: ${ctx.from.id}`);
     const menu = new Keyboard().text("Открыть карту 🔥").row().text("Мой профиль 👤");
     if (ctx.from.id === ADMIN_ID) menu.row().text("Список водителей 📋");
     
@@ -72,6 +76,7 @@ async function showMainMenu(ctx, user) {
 // --- 🚀 ЛОГИКА ---
 
 bot.command("start", async (ctx) => {
+    console.log(`[CMD] /start от ${ctx.from.id} (@${ctx.from.username || 'no_user'})`);
     let user = await User.findOne({ userId: ctx.from.id });
     if (!user) {
         ctx.session.step = "wait_tariff";
@@ -85,6 +90,7 @@ bot.command("start", async (ctx) => {
 bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
     const userId = ctx.from.id;
+    console.log(`[CALLBACK] Нажата кнопка: ${data} пользователем: ${userId}`);
 
     if (data.startsWith("city_")) {
         const city = data.split("_")[1];
@@ -170,6 +176,7 @@ bot.on("callback_query:data", async (ctx) => {
 bot.on("message:text", async (ctx, next) => {
     const text = ctx.msg.text;
     const userId = ctx.from.id;
+    console.log(`[MSG] Текст: "${text}" от ${userId}. Текущий шаг: ${ctx.session.step}`);
 
     if (ctx.session.step === "admin_editing" && userId === ADMIN_ID) {
         const targetId = ctx.session.editTarget;
@@ -179,6 +186,7 @@ bot.on("message:text", async (ctx, next) => {
         
         await User.findOneAndUpdate({ userId: targetId }, update);
         ctx.session.step = "idle";
+        console.log(`[ADMIN] Поле ${field} успешно изменено для ${targetId}`);
         return ctx.reply(`✅ Обновлено!`, { reply_markup: new InlineKeyboard().text("К профилю", `manage_${targetId}`) });
     }
 
@@ -189,6 +197,7 @@ bot.on("message:text", async (ctx, next) => {
             if (u?.isAllowed) {
                 if (u.expiryDate && dayjs().isAfter(dayjs(u.expiryDate))) {
                     u.isAllowed = false; await u.save();
+                    console.log(`[ACCESS] Доступ истек для ${userId}`);
                     return ctx.reply("⌛️ Срок доступа истек.");
                 }
                 return ctx.reply("📍 Карта готова!", { reply_markup: new InlineKeyboard().webApp("Запустить", webAppUrl) });
@@ -216,8 +225,7 @@ bot.on("message:text", async (ctx, next) => {
         case "wait_tariff":
             user.tariff = text;
             ctx.session.step = "wait_city";
-            await ctx.reply("🏙 Выберите ваш город:", { reply_markup: getCitiesKeyboard(), reply_markup: { remove_keyboard: true } });
-            // Здесь фокус: отправляем Inline-клавиатуру и удаляем обычную
+            await ctx.reply("🏙 Выберите ваш город:", { reply_markup: { remove_keyboard: true } });
             await ctx.reply("👇 Список городов:", { reply_markup: getCitiesKeyboard() });
             await user.save();
             break;
@@ -237,6 +245,7 @@ bot.on("message:text", async (ctx, next) => {
             user.car = `${user.car} [${text.toUpperCase()}]`;
             ctx.session.step = "idle";
             await user.save();
+            console.log(`[REG] Новая регистрация завершена: ${user.name}`);
             await ctx.reply("🏁 Заявка отправлена!");
             await bot.api.sendMessage(ADMIN_ID, `🔔 Новая заявка от ${user.name}!`);
             await showMainMenu(ctx, user);
@@ -244,5 +253,29 @@ bot.on("message:text", async (ctx, next) => {
     }
 });
 
-bot.start();
-http.createServer((req, res) => { res.end("OK"); }).listen(process.env.PORT || 8080);
+// --- ОБРАБОТКА ОШИБОК ---
+bot.catch((err) => {
+    const ctx = err.ctx;
+    console.error(`[ERROR] Ошибка при обработке обновления ${ctx.update.update_id}:`);
+    const e = err.error;
+    if (e instanceof GrammyError) {
+      console.error("[GRAMMY] Ошибка в запросе:", e.description);
+    } else if (e instanceof HttpError) {
+      console.error("[HTTP] Не удалось связаться с Telegram:", e);
+    } else {
+      console.error("[UNKNOWN] Неизвестная ошибка:", e);
+    }
+});
+
+// --- ЗАПУСК ---
+bot.start({
+    onStart: (botInfo) => {
+        console.log(`[SERVER] Бот запущен успешно как @${botInfo.username}`);
+    }
+});
+
+http.createServer((req, res) => { 
+    res.writeHead(200);
+    res.end("OK"); 
+    console.log(`[HTTP] Пинг получен в ${new Date().toLocaleTimeString()}`);
+}).listen(process.env.PORT || 8080);
