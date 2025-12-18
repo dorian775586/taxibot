@@ -92,7 +92,7 @@ async function updateAllCities() {
             const events = data.results.filter(i => i.place && i.place.coords).map(i => ({
                 city: cityName,
                 title: i.title, address: i.place.address, lat: i.place.coords.lat, lng: i.place.coords.lon,
-                expireAt: dayjs().add(24, 'hour').toDate() // Точки живут 24 часа (до следующего обновления)
+                expireAt: dayjs().add(24, 'hour').toDate() // Точки живут 24 часа
             }));
             if (events.length > 0) { 
                 await Event.insertMany(events); 
@@ -110,7 +110,7 @@ setInterval(() => {
         console.log("Запуск ежедневного обновления в 7:00 МСК...");
         updateAllCities();
     }
-}, 60000); // Проверка каждую минуту
+}, 60000); 
 
 // --- 🛠️ КЛАВИАТУРЫ ---
 function getCitiesKeyboard() {
@@ -133,15 +133,13 @@ bot.command("start", async (ctx) => {
     }
 
     const menu = new Keyboard()
-        .text("Открыть карту 🔥").row()
+        .text("Открыть карту 🔥").text("Буст аккаунта ⚡️").row()
         .text("Цены на топливо ⛽️").text("Мой профиль 👤").row();
     
     if (ctx.from.id === ADMIN_ID) {
-        // Меню админа
         menu.text("Аналитика 📊").row()
             .text("Список водителей 📋").text("Обновить карту 🔄");
     } else {
-        // Меню обычного пользователя
         menu.text("Анализ аккаунта 🔍");
     }
     
@@ -185,8 +183,6 @@ bot.on("callback_query:data", async (ctx) => {
         const tid = data.split("_")[1];
         const u = await User.findOne({ userId: tid });
         const exp = u.expiryDate ? dayjs(u.expiryDate).format("DD.MM.YYYY") : "—";
-        
-        // Исправленное отображение ссылки на ТГ
         const tgLink = u.username !== "—" ? `@${u.username}` : (u.displayName || "Скрыто");
 
         const kb = new InlineKeyboard()
@@ -230,7 +226,6 @@ bot.on("message:text", async (ctx) => {
     const userId = ctx.from.id;
     const user = await User.findOne({ userId });
 
-    // Обработка ввода номера телефона для анализа
     if (ctx.session.step === "wait_phone") {
         ctx.session.step = "idle";
         await ctx.reply("✅ Ваша заявка принята! Специалист свяжется с вами в ближайшее время.");
@@ -243,6 +238,16 @@ bot.on("message:text", async (ctx) => {
             return ctx.reply("📍 Карта готова:", { reply_markup: new InlineKeyboard().webApp("Запустить", `${webAppUrl}?city=${encodeURIComponent(user?.city || 'Москва')}`) });
         }
         return ctx.reply("🚫 Нет доступа.");
+    }
+
+    if (text === "Буст аккаунта ⚡️") {
+        if (userId === ADMIN_ID || (user?.isAllowed && user.expiryDate > new Date())) {
+            // Открываем ту же вебапку, но передаем параметр page=boost
+            return ctx.reply("⚡️ Система ускорения заказов:", { 
+                reply_markup: new InlineKeyboard().webApp("Запустить Буст", `${webAppUrl}?page=boost&id=${user?.name || 'Driver'}`) 
+            });
+        }
+        return ctx.reply("🚫 Доступ к системе Буста закрыт. Обратитесь к администратору.");
     }
 
     if (text === "Анализ аккаунта 🔍") {
@@ -266,7 +271,6 @@ bot.on("message:text", async (ctx) => {
         return ctx.reply(`👤 **Профиль:**\nID: ${user.name}\nГород: ${user.city}\nДоступ до: ${exp}`, { parse_mode: "Markdown" });
     }
 
-    // Аналитика ТОЛЬКО для админа
     if (text === "Аналитика 📊" && userId === ADMIN_ID) {
         const uCount = await User.countDocuments();
         const eCount = await Event.countDocuments();
@@ -296,7 +300,7 @@ bot.on("message:text", async (ctx) => {
 bot.catch((err) => console.error(err));
 bot.start();
 
-// --- API СЕРВЕР ДЛЯ КАРТЫ ---
+// --- API СЕРВЕР ---
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     if (req.url.startsWith('/api/points')) {
