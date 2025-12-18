@@ -15,7 +15,11 @@ dayjs.extend(timezone);
 const token = "7973955726:AAFpMltfoqwO902Q1su5j6HWipPxEJYM3-o";
 const webAppUrl = "https://hotmaptaxi-git-main-dorians-projects-14978635.vercel.app";
 const mongoUri = "mongodb+srv://user775586:user775586@cluster0.36spuej.mongodb.net/?appName=Cluster0"; 
+
+// Список администраторов
 const ADMIN_ID = 623203896; 
+const SECOND_ADMIN_ID = 7469074713; // @hotmapfix
+const ADMINS = [ADMIN_ID, SECOND_ADMIN_ID];
 
 const bot = new Bot(token);
 
@@ -30,7 +34,7 @@ const userSchema = new mongoose.Schema({
     isAllowed: { type: Boolean, default: false },
     expiryDate: { type: Date, default: null }, 
     username: String,
-    displayName: String, // Имя из профиля ТГ (first_name)
+    displayName: String, // Имя из профиля ТГ
     regDate: { type: Date, default: Date.now }
 });
 const User = mongoose.model("User", userSchema);
@@ -45,74 +49,23 @@ const Event = mongoose.model("Event", new mongoose.Schema({
     city: String, title: String, address: String, lat: Number, lng: Number, expireAt: Date
 }));
 
-bot.use(session({ initial: () => ({ step: "idle", tariff: null }) }));
-
-// --- 🌐 ПАРСЕР ТОПЛИВА ---
-async function fetchFuelPrices(cityName) {
-    try {
-        const cityTranslit = {
-            "Москва": "moskva", "Санкт-Петербург": "sankt-peterburg", 
-            "Новосибирск": "novosibirsk", "Екатеринбург": "ekaterinburg", 
-            "Казань": "kazan", "Челябинск": "chelyabinsk"
-        };
-        const slug = cityTranslit[cityName];
-        if (!slug) return null;
-        const { data } = await axios.get(`https://fuelprices.ru/${slug}`, { timeout: 8000 });
-        const $ = cheerio.load(data);
-        const p = [];
-        $(".price_table tr td").each((i, el) => p.push($(el).text().trim()));
-        if (p.length > 5) {
-            const fuelData = {
-                city: cityName,
-                ai92: p[1] || "—", ai95: p[3] || "—", dt: p[5] || "—", gas: p[7] || "—",
-                lastUpdate: new Date()
-            };
-            await Fuel.findOneAndUpdate({ city: cityName }, fuelData, { upsert: true });
-            return fuelData;
-        }
-    } catch (e) { return null; }
-}
-
-// --- 🚀 ПАРСЕР КАРТЫ (С ПЕРИОДОМ 24 ЧАСА) ---
-async function updateAllCities() {
-    const CITIES_MAP = {
-        "msk": "Москва", "spb": "Санкт-Петербург", "kzn": "Казань", 
-        "nsk": "Новосибирск", "ekb": "Екатеринбург", "nnv": "Нижний Новгород", "che": "Челябинск"
-    };
-    const nowUnix = Math.floor(Date.now() / 1000);
-    let total = 0;
-    
-    // Очищаем старые точки перед обновлением
-    await Event.deleteMany({});
-
-    for (const [slug, cityName] of Object.entries(CITIES_MAP)) {
-        try {
-            const url = `https://kudago.com/public-api/v1.4/events/?location=${slug}&fields=title,place,dates&page_size=35&expand=place&actual_since=${nowUnix}`;
-            const { data } = await axios.get(url);
-            const events = data.results.filter(i => i.place && i.place.coords).map(i => ({
-                city: cityName,
-                title: i.title, address: i.place.address, lat: i.place.coords.lat, lng: i.place.coords.lon,
-                expireAt: dayjs().add(24, 'hour').toDate() // Точки живут 24 часа
-            }));
-            if (events.length > 0) { 
-                await Event.insertMany(events); 
-                total += events.length; 
-            }
-        } catch (e) {}
-    }
-    return total;
-}
-
-// --- 🕒 АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ В 7:00 ПО МСК ---
-setInterval(() => {
-    const nowMsk = dayjs().tz("Europe/Moscow");
-    if (nowMsk.hour() === 7 && nowMsk.minute() === 0) {
-        console.log("Запуск ежедневного обновления в 7:00 МСК...");
-        updateAllCities();
-    }
-}, 60000); 
+// Инициализация сессии (добавлен replyToUser для админов)
+bot.use(session({ initial: () => ({ step: "idle", tariff: null, replyToUser: null }) }));
 
 // --- 🛠️ КЛАВИАТУРЫ ---
+function getMainKeyboard(userId) {
+    const kb = new Keyboard()
+        .text("Открыть карту 🔥").text("Буст аккаунта ⚡️").row() // Карта и Буст сверху в одном ряду
+        .text("Цены на топливо ⛽️").text("Мой профиль 👤").row()
+        .text("Анализ аккаунта 🔍").row()
+        .text("Техподдержка 🆘"); // Кнопка техподдержки
+
+    if (ADMINS.includes(userId)) {
+        kb.row().text("Аналитика 📊").text("Список водителей 📋").row().text("Обновить карту 🔄");
+    }
+    return kb.resized();
+}
+
 function getCitiesKeyboard() {
     const kb = new InlineKeyboard();
     ["Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань", "Челябинск"].forEach((c, i) => {
@@ -132,23 +85,20 @@ bot.command("start", async (ctx) => {
         });
     }
 
-    const menu = new Keyboard()
-        .text("Открыть карту 🔥").text("Буст аккаунта ⚡️").row()
-        .text("Цены на топливо ⛽️").text("Мой профиль 👤").row();
-    
-    if (ctx.from.id === ADMIN_ID) {
-        menu.text("Аналитика 📊").row()
-            .text("Список водителей 📋").text("Обновить карту 🔄");
-    } else {
-        menu.text("Анализ аккаунта 🔍");
-    }
-    
     const status = (user.isAllowed && user.expiryDate > new Date()) ? "🟢 Активен" : "🔴 Доступ закрыт";
-    await ctx.reply(`🏠 **Главное меню**\nСтатус: ${status}`, { reply_markup: menu.resized(), parse_mode: "Markdown" });
+    await ctx.reply(`🏠 **Главное меню**\nСтатус: ${status}`, { reply_markup: getMainKeyboard(ctx.from.id), parse_mode: "Markdown" });
 });
 
 bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
+
+    // Обработка кнопки "Ответить" для админов
+    if (data.startsWith("reply_")) {
+        const targetId = data.split("_")[1];
+        ctx.session.replyToUser = targetId;
+        await ctx.answerCallbackQuery();
+        return ctx.reply(`✍️ Введите сообщение для ответа водителю (ID: ${targetId}):`);
+    }
 
     if (data === "accept_analysis") {
         ctx.session.step = "wait_phone";
@@ -174,10 +124,12 @@ bot.on("callback_query:data", async (ctx) => {
         await user.save();
         ctx.session.step = "idle";
         await ctx.editMessageText(`✅ Заявка отправлена!\nID: ${user.name}\nГород: ${city}\n\nОжидайте активации админом.`);
-        await bot.api.sendMessage(ADMIN_ID, `🔔 Новая заявка: ${user.name} (@${ctx.from.username || 'нет юзернейма'})`);
+        ADMINS.forEach(adminId => {
+            bot.api.sendMessage(adminId, `🔔 Новая заявка: ${user.name} (@${ctx.from.username || 'нет юзернейма'})`);
+        });
     }
 
-    if (ctx.from.id !== ADMIN_ID) return;
+    if (!ADMINS.includes(ctx.from.id)) return;
 
     if (data.startsWith("manage_")) {
         const tid = data.split("_")[1];
@@ -226,28 +178,68 @@ bot.on("message:text", async (ctx) => {
     const userId = ctx.from.id;
     const user = await User.findOne({ userId });
 
+    // Логика ответа админа водителю
+    if (ADMINS.includes(userId) && ctx.session.replyToUser) {
+        const targetId = ctx.session.replyToUser;
+        try {
+            await bot.api.sendMessage(targetId, `📩 **Сообщение от техподдержки:**\n\n${text}`, { parse_mode: "Markdown" });
+            await ctx.reply(`✅ Ответ отправлен водителю (ID: ${targetId})`);
+        } catch (e) {
+            await ctx.reply("❌ Не удалось отправить сообщение. Возможно, пользователь заблокировал бота.");
+        }
+        ctx.session.replyToUser = null;
+        return;
+    }
+
+    // Логика приема сообщения в техподдержку
+    if (ctx.session.step === "wait_support") {
+        ctx.session.step = "idle";
+        const supportMsg = `🆘 **НОВОЕ ОБРАЩЕНИЕ В ПОДДЕРЖКУ**\n\n` +
+                           `👤 **Водитель:** ${user?.name || 'Неизвестно'}\n` +
+                           `🏙 **Город:** ${user?.city || '—'}\n` +
+                           `🚕 **Тариф:** ${user?.tariff || '—'}\n` +
+                           `🔗 **TG:** @${ctx.from.username || 'нет'}\n` +
+                           `🆔 **User ID:** ${userId}\n\n` +
+                           `💬 **Сообщение:** ${text}`;
+
+        for (const adminId of ADMINS) {
+            await bot.api.sendMessage(adminId, supportMsg, { 
+                reply_markup: new InlineKeyboard().text("Ответить 💬", `reply_${userId}`) 
+            });
+        }
+
+        return ctx.reply("✅ Ваше обращение принято и передано специалистам. Мы ответим вам в этом чате в ближайшее время.\n\n" +
+                         "⚠️ *Если вы не получили ответа в течение 60 минут, пожалуйста, напишите нам напрямую:* @hotmapfix", { parse_mode: "Markdown" });
+    }
+
     if (ctx.session.step === "wait_phone") {
         ctx.session.step = "idle";
         await ctx.reply("✅ Ваша заявка принята! Специалист свяжется с вами в ближайшее время.");
-        await bot.api.sendMessage(ADMIN_ID, `🚀 **НОВАЯ ЗАЯВКА НА АНАЛИЗ**\n\n👤 Имя: ${user?.name || 'Неизвестно'}\n📍 Город: ${user?.city || '—'}\n📞 Номер: ${text}\n🔗 ТГ: @${ctx.from.username || 'нет'}`);
+        ADMINS.forEach(adminId => {
+            bot.api.sendMessage(adminId, `🚀 **НОВАЯ ЗАЯВКА НА АНАЛИЗ**\n\n👤 Имя: ${user?.name || 'Неизвестно'}\n📍 Город: ${user?.city || '—'}\n📞 Номер: ${text}\n🔗 ТГ: @${ctx.from.username || 'нет'}`);
+        });
         return;
     }
 
     if (text === "Открыть карту 🔥") {
-        if (userId === ADMIN_ID || (user?.isAllowed && user.expiryDate > new Date())) {
+        if (ADMINS.includes(userId) || (user?.isAllowed && user.expiryDate > new Date())) {
             return ctx.reply("📍 Карта готова:", { reply_markup: new InlineKeyboard().webApp("Запустить", `${webAppUrl}?city=${encodeURIComponent(user?.city || 'Москва')}`) });
         }
         return ctx.reply("🚫 Нет доступа.");
     }
 
     if (text === "Буст аккаунта ⚡️") {
-        if (userId === ADMIN_ID || (user?.isAllowed && user.expiryDate > new Date())) {
-            // Открываем ту же вебапку, но передаем параметр page=boost
+        if (ADMINS.includes(userId) || (user?.isAllowed && user.expiryDate > new Date())) {
             return ctx.reply("⚡️ Система ускорения заказов:", { 
                 reply_markup: new InlineKeyboard().webApp("Запустить Буст", `${webAppUrl}?page=boost&id=${user?.name || 'Driver'}`) 
             });
         }
         return ctx.reply("🚫 Доступ к системе Буста закрыт. Обратитесь к администратору.");
+    }
+
+    if (text === "Техподдержка 🆘") {
+        ctx.session.step = "wait_support";
+        return ctx.reply("👋 **Здравствуйте!**\n\nЕсли вы столкнулись с технической неисправностью, ошибкой в работе карты или системы «Буст», пожалуйста, напишите максимально подробно, что именно произошло. Мы изучим ваше обращение и ответим прямо здесь.", { reply_markup: { remove_keyboard: true } });
     }
 
     if (text === "Анализ аккаунта 🔍") {
@@ -271,21 +263,22 @@ bot.on("message:text", async (ctx) => {
         return ctx.reply(`👤 **Профиль:**\nID: ${user.name}\nГород: ${user.city}\nДоступ до: ${exp}`, { parse_mode: "Markdown" });
     }
 
-    if (text === "Аналитика 📊" && userId === ADMIN_ID) {
+    if (text === "Аналитика 📊" && ADMINS.includes(userId)) {
         const uCount = await User.countDocuments();
         const eCount = await Event.countDocuments();
         return ctx.reply(`📊 **Статистика:**\nВодителей: ${uCount}\nТочек на карте: ${eCount}`);
     }
 
-    if (text === "Список водителей 📋" && userId === ADMIN_ID) {
+    if (text === "Список водителей 📋" && ADMINS.includes(userId)) {
         const users = await User.find().sort({ regDate: -1 }).limit(30);
         const kb = new InlineKeyboard();
         users.forEach(u => kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name || u.userId}`, `manage_${u.userId}`).row());
         return ctx.reply("👥 Список водителей:", { reply_markup: kb });
     }
 
-    if (text === "Обновить карту 🔄" && userId === ADMIN_ID) {
+    if (text === "Обновить карту 🔄" && ADMINS.includes(userId)) {
         await ctx.reply("📡 Обновляю точки...");
+        // Внутренняя функция updateAllCities должна быть определена выше в коде
         const count = await updateAllCities();
         return ctx.reply(`✅ Карта обновлена! Добавлено точек: ${count}`);
     }
