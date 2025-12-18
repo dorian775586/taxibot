@@ -6,10 +6,21 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
+const admin = require("firebase-admin"); // Добавлено для Firebase
 
 // Настройка работы со временем
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+// --- 🔑 ИНИЦИАЛИЗАЦИЯ FIREBASE (Для ручного управления ценами) ---
+// Убедитесь, что файл serviceAccountKey.json лежит в корневой папке
+try {
+    const serviceAccount = require("./serviceAccountKey.json"); 
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+} catch (e) {
+    console.log("⚠️ Firebase key не найден. Ручное управление ценами через Firebase будет недоступно.");
+}
+const dbFirestore = admin.apps.length ? admin.firestore() : null;
 
 // --- ⚙️ НАСТРОЙКИ ---
 const token = "7973955726:AAFpMltfoqwO902Q1su5j6HWipPxEJYM3-o";
@@ -49,8 +60,98 @@ const Event = mongoose.model("Event", new mongoose.Schema({
     city: String, title: String, address: String, lat: Number, lng: Number, expireAt: Date
 }));
 
-// Инициализация сессии (добавлен replyToUser для админов)
-bot.use(session({ initial: () => ({ step: "idle", tariff: null, replyToUser: null }) }));
+// Модель для отображения машинок такси
+const Taxi = mongoose.model("Taxi", new mongoose.Schema({
+    city: String, lat: Number, lng: Number, expireAt: Date
+}));
+
+// Инициализация сессии (добавлен replyToUser для админов, editingCity для цен)
+bot.use(session({ initial: () => ({ step: "idle", tariff: null, replyToUser: null, editingCity: null }) }));
+
+// --- 🌐 ПАРСЕР ТОПЛИВА (Автоматический резерв) ---
+async function fetchFuelPrices(cityName) {
+    try {
+        const cityTranslit = {
+            "Москва": "moskva", "Санкт-Петербург": "sankt-peterburg", 
+            "Новосибирск": "novosibirsk", "Екатеринбург": "ekaterinburg", 
+            "Казань": "kazan", "Челябинск": "chelyabinsk"
+        };
+        const slug = cityTranslit[cityName];
+        if (!slug) return null;
+        const { data } = await axios.get(`https://fuelprices.ru/${slug}`, { timeout: 8000 });
+        const $ = cheerio.load(data);
+        const p = [];
+        $(".price_table tr td").each((i, el) => p.push($(el).text().trim()));
+        if (p.length > 5) {
+            const fuelData = {
+                city: cityName,
+                ai92: p[1] || "—", ai95: p[3] || "—", dt: p[5] || "—", gas: p[7] || "—",
+                lastUpdate: new Date()
+            };
+            await Fuel.findOneAndUpdate({ city: cityName }, fuelData, { upsert: true });
+            return fuelData;
+        }
+    } catch (e) { return null; }
+}
+
+// --- 🚀 ЛОГИКА ГЕНЕРАЦИИ МАШИНОК (А-ЛЯ ЯНДЕКС) ---
+async function generateFakeTaxis(cityName, eventPoints) {
+    const taxis = [];
+    const count = 15 + Math.floor(Math.random() * 10); 
+    for (let i = 0; i < count; i++) {
+        const basePoint = eventPoints[Math.floor(Math.random() * eventPoints.length)] || { lat: 55.75, lng: 37.61 };
+        let lat = basePoint.lat + (Math.random() - 0.5) * 0.12;
+        let lng = basePoint.lng + (Math.random() - 0.5) * 0.12;
+
+        // Проверка: машинка попадает в фиолетовую зону?
+        let inZone = eventPoints.some(p => {
+            const dist = Math.sqrt(Math.pow(p.lat - lat, 2) + Math.pow(p.lng - lng, 2));
+            return dist < 0.015; 
+        });
+
+        // Если попала в зону — в 90% случаев выталкиваем её наружу
+        if (inZone && Math.random() > 0.1) {
+            lat += (Math.random() > 0.5 ? 0.02 : -0.02);
+            lng += (Math.random() > 0.5 ? 0.02 : -0.02);
+        }
+
+        taxis.push({ city: cityName, lat, lng, expireAt: dayjs().add(10, 'minute').toDate() });
+    }
+    if (taxis.length) await Taxi.insertMany(taxis);
+}
+
+// --- 🚀 ПАРСЕР КАРТЫ (ОБНОВЛЕНИЕ РАЗ В 10 МИНУТ) ---
+async function updateAllCities() {
+    const CITIES_MAP = {
+        "msk": "Москва", "spb": "Санкт-Петербург", "kzn": "Казань", 
+        "nsk": "Новосибирск", "ekb": "Екатеринбург", "che": "Челябинск"
+    };
+    await Event.deleteMany({});
+    await Taxi.deleteMany({}); 
+    let total = 0;
+
+    for (const [slug, cityName] of Object.entries(CITIES_MAP)) {
+        try {
+            const url = `https://kudago.com/public-api/v1.4/events/?location=${slug}&fields=place,dates,title&page_size=25&expand=place&actual_since=${Math.floor(Date.now()/1000)}`;
+            const { data } = await axios.get(url);
+            const events = data.results.filter(i => i.place?.coords).map(i => ({
+                city: cityName, title: i.title, address: i.place.address,
+                lat: i.place.coords.lat, lng: i.place.coords.lon,
+                expireAt: dayjs().add(10, 'minute').toDate()
+            }));
+            
+            if (events.length > 0) { 
+                await Event.insertMany(events); 
+                await generateFakeTaxis(cityName, events);
+                total += events.length; 
+            }
+        } catch (e) { console.log("Ошибка обновления " + cityName); }
+    }
+    return total;
+}
+
+// Автообновление каждые 10 минут
+setInterval(updateAllCities, 600000);
 
 // --- 🛠️ КЛАВИАТУРЫ ---
 function getMainKeyboard(userId) {
@@ -91,6 +192,15 @@ bot.command("start", async (ctx) => {
 
 bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
+
+    // Редактирование цен для админа
+    if (data.startsWith("edit_fuel_")) {
+        const city = data.split("_")[2];
+        ctx.session.step = "edit_fuel_input";
+        ctx.session.editingCity = city;
+        await ctx.answerCallbackQuery();
+        return ctx.reply(`📝 Введите новые цены для города **${city}** в одну строку через пробел (92 95 ДТ Газ).\nПример: \`52.50 58.30 62.00 28.50\``);
+    }
 
     // Обработка кнопки "Ответить" для админов
     if (data.startsWith("reply_")) {
@@ -178,6 +288,24 @@ bot.on("message:text", async (ctx) => {
     const userId = ctx.from.id;
     const user = await User.findOne({ userId });
 
+    // Обработка ввода новых цен (Админ)
+    if (ctx.session.step === "edit_fuel_input" && ADMINS.includes(userId)) {
+        const prices = text.split(" ");
+        if (prices.length < 4) return ctx.reply("❌ Ошибка! Введите 4 значения через пробел.");
+        
+        if (dbFirestore) {
+            await dbFirestore.collection("fuel").doc(ctx.session.editingCity).set({
+                ai92: prices[0], ai95: prices[1], dt: prices[2], gas: prices[3], lastUpdate: new Date()
+            });
+        }
+        await Fuel.findOneAndUpdate({ city: ctx.session.editingCity }, {
+            ai92: prices[0], ai95: prices[1], dt: prices[2], gas: prices[3], lastUpdate: new Date()
+        }, { upsert: true });
+
+        ctx.session.step = "idle";
+        return ctx.reply(`✅ Цены для города **${ctx.session.editingCity}** обновлены!`);
+    }
+
     // Логика ответа админа водителю
     if (ADMINS.includes(userId) && ctx.session.replyToUser) {
         const targetId = ctx.session.replyToUser;
@@ -251,10 +379,27 @@ bot.on("message:text", async (ctx) => {
 
     if (text === "Цены на топливо ⛽️") {
         if (!user) return;
-        let f = await Fuel.findOne({ city: user.city });
+        
+        // Пытаемся взять данные из Firebase (если настроено) или MongoDB
+        let f = null;
+        if (dbFirestore) {
+            const doc = await dbFirestore.collection("fuel").doc(user.city).get();
+            if (doc.exists) f = doc.data();
+        }
+        if (!f) f = await Fuel.findOne({ city: user.city });
         if (!f) f = await fetchFuelPrices(user.city);
-        if (!f) return ctx.reply("❌ Нет данных.");
-        return ctx.reply(`⛽️ **Цены ${user.city}:**\n92: ${f.ai92}р\n95: ${f.ai95}р\nДТ: ${f.dt}р\nГаз: ${f.gas}р`, { parse_mode: "Markdown" });
+        
+        if (!f) return ctx.reply("❌ Данные временно отсутствуют.");
+
+        const kb = new InlineKeyboard();
+        if (ADMINS.includes(userId)) {
+            kb.text("Изменить цены 📝", `edit_fuel_${user.city}`);
+        }
+
+        return ctx.reply(`⛽️ **Цены ${user.city}:**\n92: ${f.ai92}р\n95: ${f.ai95}р\nДТ: ${f.dt}р\nГаз: ${f.gas}р`, { 
+            parse_mode: "Markdown",
+            reply_markup: kb
+        });
     }
 
     if (text === "Мой профиль 👤") {
@@ -266,7 +411,8 @@ bot.on("message:text", async (ctx) => {
     if (text === "Аналитика 📊" && ADMINS.includes(userId)) {
         const uCount = await User.countDocuments();
         const eCount = await Event.countDocuments();
-        return ctx.reply(`📊 **Статистика:**\nВодителей: ${uCount}\nТочек на карте: ${eCount}`);
+        const tCount = await Taxi.countDocuments();
+        return ctx.reply(`📊 **Статистика:**\nВодителей: ${uCount}\nТочек на карте: ${eCount}\nМашинок такси: ${tCount}`);
     }
 
     if (text === "Список водителей 📋" && ADMINS.includes(userId)) {
@@ -277,10 +423,9 @@ bot.on("message:text", async (ctx) => {
     }
 
     if (text === "Обновить карту 🔄" && ADMINS.includes(userId)) {
-        await ctx.reply("📡 Обновляю точки...");
-        // Внутренняя функция updateAllCities должна быть определена выше в коде
+        await ctx.reply("📡 Обновляю точки и машинки...");
         const count = await updateAllCities();
-        return ctx.reply(`✅ Карта обновлена! Добавлено точек: ${count}`);
+        return ctx.reply(`✅ Карта обновлена! Добавлено зон: ${count}`);
     }
 
     if (ctx.session.step === "wait_tariff") {
@@ -296,12 +441,19 @@ bot.start();
 // --- API СЕРВЕР ---
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    if (req.url.startsWith('/api/points')) {
-        const url = new URL(req.url, `http://${req.headers.host}`);
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    
+    if (req.url.startsWith('/api/points') || req.url.startsWith('/api/data')) {
         const city = url.searchParams.get('city');
         const filter = (city && city !== "undefined" && city !== "null") ? { city } : {};
+        
         const events = await Event.find(filter);
-        res.end(JSON.stringify(events));
+        const taxis = await Taxi.find(filter);
+        
+        res.end(JSON.stringify({
+            events: events,
+            taxis: taxis
+        }));
     } else {
         res.end(JSON.stringify({ status: "running" }));
     }
