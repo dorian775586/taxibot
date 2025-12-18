@@ -52,48 +52,39 @@ const Taxi = mongoose.model("Taxi", new mongoose.Schema({
 
 bot.use(session({ initial: () => ({ step: "idle", tariff: null, replyToUser: null, editingCity: null }) }));
 
-// --- 🚀 ЛОГИКА ДИНАМИЧЕСКИХ МАШИНОК (15 КМ ОТ GPS) ---
-async function getDynamicTaxis(userLat, userLng, cityName) {
-    // Чистим старые машинки
+// --- 🚀 ГЕНЕРАЦИЯ МАШИН ВОКРУГ GPS ---
+async function generateTaxisAroundUser(userLat, userLng, cityName) {
     await Taxi.deleteMany({ expireAt: { $lt: new Date() } });
+    const zones = await Event.find({ city: cityName });
 
-    // Ищем фиолетовые зоны рядом, чтобы знать, куда НЕ ставить машинки
-    const zones = await Event.find({
-        city: cityName,
-        lat: { $gt: userLat - 0.2, $lt: userLat + 0.2 },
-        lng: { $gt: userLng - 0.2, $lt: userLng + 0.2 }
-    });
-
-    const taxis = [];
-    const count = 12 + Math.floor(Math.random() * 8); // 12-20 машин вокруг юзера
+    const newTaxis = [];
+    const count = 15 + Math.floor(Math.random() * 10); 
 
     for (let i = 0; i < count; i++) {
-        let lat = userLat + (Math.random() - 0.5) * 0.25; // разброс ~15км
-        let lng = userLng + (Math.random() - 0.5) * 0.25;
+        let lat = userLat + (Math.random() - 0.5) * 0.2; 
+        let lng = userLng + (Math.random() - 0.5) * 0.2;
 
-        // Проверяем нахождение в фиолетовой зоне
-        let inZone = zones.some(z => Math.sqrt(Math.pow(z.lat - lat, 2) + Math.pow(z.lng - lng, 2)) < 0.015);
+        let inZone = zones.some(z => {
+            const dist = Math.sqrt(Math.pow(z.lat - lat, 2) + Math.pow(z.lng - lng, 2));
+            return dist < 0.015; 
+        });
 
-        // Если попала в зону, только 10% шанс что она там останется, иначе выталкиваем
         if (inZone && Math.random() > 0.1) {
-            lat += (Math.random() > 0.5 ? 0.03 : -0.03);
-            lng += (Math.random() > 0.5 ? 0.03 : -0.03);
+            lat += (Math.random() > 0.5 ? 0.025 : -0.025);
+            lng += (Math.random() > 0.5 ? 0.025 : -0.025);
         }
 
-        taxis.push({
-            city: cityName,
-            lat: lat,
-            lng: lng,
-            expireAt: dayjs().add(15, 'minute').toDate()
+        newTaxis.push({
+            city: cityName, lat: lat, lng: lng,
+            expireAt: dayjs().add(10, 'minute').toDate()
         });
     }
     
-    // Сохраняем и возвращаем
-    if (taxis.length) await Taxi.insertMany(taxis);
-    return taxis;
+    if (newTaxis.length) await Taxi.insertMany(newTaxis);
+    return newTaxis;
 }
 
-// --- 🚀 ПАРСЕР ЗОН (БЕЗ МАШИНОК) ---
+// --- 🚀 ОБНОВЛЕНИЕ ЗОН ---
 async function updateAllCities() {
     const CITIES_MAP = {
         "msk": "Москва", "spb": "Санкт-Петербург", "kzn": "Казань", 
@@ -118,8 +109,7 @@ async function updateAllCities() {
     }
     return total;
 }
-
-setInterval(updateAllCities, 1800000); // Зоны обновляем раз в 30 мин
+setInterval(updateAllCities, 600000);
 
 // --- 🛠️ КЛАВИАТУРЫ ---
 function getMainKeyboard(userId) {
@@ -176,10 +166,12 @@ bot.on("callback_query:data", async (ctx) => {
 
     if (data === "accept_analysis") {
         ctx.session.step = "wait_phone";
-        return ctx.editMessageText("📞 Пожалуйста, введите ваш контактный номер телефона:");
+        return ctx.editMessageText("📞 Пожалуйста, введите ваш контактный номер телефона для связи со специалистом техподдержки:");
     }
 
-    if (data === "cancel_analysis") return ctx.editMessageText("🏠 Меню.");
+    if (data === "cancel_analysis") {
+        return ctx.editMessageText("🏠 Вы вернулись в меню. Выберите нужный раздел.");
+    }
 
     if (data.startsWith("regcity_")) {
         const city = data.split("_")[1];
@@ -192,7 +184,7 @@ bot.on("callback_query:data", async (ctx) => {
         });
         await user.save();
         ctx.session.step = "idle";
-        await ctx.editMessageText(`✅ Заявка отправлена!\nID: ${user.name}\nОжидайте активации.`);
+        await ctx.editMessageText(`✅ Заявка отправлена!\nID: ${user.name}\nГород: ${city}\n\nОжидайте активации админом.`);
         ADMINS.forEach(adminId => bot.api.sendMessage(adminId, `🔔 Новая заявка: ${user.name} (@${ctx.from.username || 'нет'})`));
     }
 
@@ -209,7 +201,7 @@ bot.on("callback_query:data", async (ctx) => {
         const users = await User.find().sort({ regDate: -1 }).limit(30);
         const kb = new InlineKeyboard();
         users.forEach(u => kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name || u.userId}`, `manage_${u.userId}`).row());
-        await ctx.editMessageText("👥 Список:", { reply_markup: kb });
+        await ctx.editMessageText("👥 Список водителей:", { reply_markup: kb });
     }
 
     if (data.startsWith("allow_") || data.startsWith("block_")) {
@@ -217,16 +209,11 @@ bot.on("callback_query:data", async (ctx) => {
         const ok = act === "allow";
         await User.findOneAndUpdate({ userId: tid }, { isAllowed: ok, expiryDate: ok ? dayjs().add(31, 'day').toDate() : null });
         ctx.answerCallbackQuery("Выполнено");
-        bot.api.sendMessage(tid, ok ? "✅ Доступ одобрен!" : "❌ Доступ ограничен.");
+        bot.api.sendMessage(tid, ok ? "✅ Доступ одобрен на 31 день!" : "❌ Доступ ограничен.");
         const users = await User.find().sort({ regDate: -1 }).limit(30);
         const kb = new InlineKeyboard();
         users.forEach(u => kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name || u.userId}`, `manage_${u.userId}`).row());
-        return ctx.editMessageText("✅ Обновлено:", { reply_markup: kb });
-    }
-
-    if (data.startsWith("delete_")) {
-        await User.findOneAndDelete({ userId: data.split("_")[1] });
-        ctx.editMessageText("🗑 Удалено.");
+        return ctx.editMessageText("✅ Статус обновлен:", { reply_markup: kb });
     }
 });
 
@@ -235,56 +222,69 @@ bot.on("message:text", async (ctx) => {
     const userId = ctx.from.id;
     const user = await User.findOne({ userId });
 
+    // ЦЕНЫ (АДМИН)
     if (ctx.session.step === "edit_fuel_input" && ADMINS.includes(userId)) {
         await Fuel.findOneAndUpdate({ city: ctx.session.editingCity }, { prices: text }, { upsert: true });
         ctx.session.step = "idle";
         return ctx.reply(`✅ Цены для города **${ctx.session.editingCity}** обновлены!`);
     }
 
+    // ОТВЕТ АДМИНА (ОРИГИНАЛ)
     if (ADMINS.includes(userId) && ctx.session.replyToUser) {
+        const targetId = ctx.session.replyToUser;
         try {
-            await bot.api.sendMessage(ctx.session.replyToUser, `📩 **Сообщение от техподдержки:**\n\n${text}`, { parse_mode: "Markdown" });
-            ctx.reply(`✅ Ответ отправлен.`);
+            await bot.api.sendMessage(targetId, `📩 **Сообщение от техподдержки:**\n\n${text}`, { parse_mode: "Markdown" });
+            await ctx.reply(`✅ Ответ отправлен водителю (ID: ${targetId})`);
         } catch (e) { ctx.reply("❌ Ошибка отправки."); }
         ctx.session.replyToUser = null;
         return;
     }
 
+    // ТЕХПОДДЕРЖКА (ОРИГИНАЛ)
     if (ctx.session.step === "wait_support") {
         ctx.session.step = "idle";
-        const supportMsg = `🆘 **ПОДДЕРЖКА**\nВодитель: ${user?.name}\nСообщение: ${text}`;
-        ADMINS.forEach(id => bot.api.sendMessage(id, supportMsg, { reply_markup: new InlineKeyboard().text("Ответить", `reply_${userId}`) }));
-        return ctx.reply("✅ Принято, ожидайте ответа.");
+        const supportMsg = `🆘 **НОВОЕ ОБРАЩЕНИЕ В ПОДДЕРЖКУ**\n\n` +
+                           `👤 **Водитель:** ${user?.name || 'Неизвестно'}\n` +
+                           `🏙 **Город:** ${user?.city || '—'}\n` +
+                           `💬 **Сообщение:** ${text}`;
+        for (const adminId of ADMINS) {
+            await bot.api.sendMessage(adminId, supportMsg, { reply_markup: new InlineKeyboard().text("Ответить 💬", `reply_${userId}`) });
+        }
+        return ctx.reply("✅ Ваше обращение принято и передано специалистам. Мы ответим вам в этом чате в ближайшее время.\n\n⚠️ *Если вы не получили ответа в течение 60 минут, напишите нам напрямую:* @hotmapfix", { parse_mode: "Markdown" });
     }
 
+    // АНАЛИЗ (ОРИГИНАЛ)
     if (ctx.session.step === "wait_phone") {
         ctx.session.step = "idle";
-        ctx.reply("✅ Ваша заявка принята!");
-        ADMINS.forEach(id => bot.api.sendMessage(id, `🚀 **ЗАЯВКА НА АНАЛИЗ**\nИмя: ${user?.name}\n📞: ${text}`));
+        await ctx.reply("✅ Ваша заявка принята! Специалист свяжется с вами в ближайшее время.");
+        ADMINS.forEach(adminId => {
+            bot.api.sendMessage(adminId, `🚀 **НОВАЯ ЗАЯВКА НА АНАЛИЗ**\n\n👤 Имя: ${user?.name || 'Неизвестно'}\n📍 Город: ${user?.city || '—'}\n📞 Номер: ${text}`);
+        });
         return;
     }
 
     if (text === "Открыть карту 🔥") {
         if (ADMINS.includes(userId) || (user?.isAllowed && user.expiryDate > new Date())) {
-            return ctx.reply("📍 Карта:", { reply_markup: new InlineKeyboard().webApp("Запустить", `${webAppUrl}?city=${encodeURIComponent(user?.city || 'Москва')}`) });
+            return ctx.reply("📍 Карта готова:", { reply_markup: new InlineKeyboard().webApp("Запустить", `${webAppUrl}?city=${encodeURIComponent(user?.city || 'Москва')}`) });
         }
         return ctx.reply("🚫 Нет доступа.");
     }
 
     if (text === "Буст аккаунта ⚡️") {
         if (ADMINS.includes(userId) || (user?.isAllowed && user.expiryDate > new Date())) {
-            return ctx.reply("⚡️ Буст:", { reply_markup: new InlineKeyboard().webApp("Запустить", `${webAppUrl}?page=boost&id=${user?.name || 'Driver'}`) });
+            return ctx.reply("⚡️ Система ускорения заказов:", { reply_markup: new InlineKeyboard().webApp("Запустить Буст", `${webAppUrl}?page=boost&id=${user?.name || 'Driver'}`) });
         }
-        return ctx.reply("🚫 Нет доступа.");
+        return ctx.reply("🚫 Доступ закрыт.");
     }
 
     if (text === "Техподдержка 🆘") {
         ctx.session.step = "wait_support";
-        return ctx.reply("Напишите вашу проблему:", { reply_markup: { remove_keyboard: true } });
+        return ctx.reply("👋 **Здравствуйте!**\n\nЕсли вы столкнулись с технической неисправностью, пожалуйста, напишите максимально подробно, что именно произошло. Мы изучим ваше обращение и ответим прямо здесь.", { reply_markup: { remove_keyboard: true } });
     }
 
     if (text === "Анализ аккаунта 🔍") {
-        return ctx.reply("Заказать анализ?", { reply_markup: new InlineKeyboard().text("✅ Да", "accept_analysis").text("❌ Нет", "cancel_analysis") });
+        const kb = new InlineKeyboard().text("✅ Согласен", "accept_analysis").text("❌ Отмена", "cancel_analysis");
+        return ctx.reply("📈 Вы можете заказать анализ своего аккаунта на предмет теневых ограничений ЯндексGo (теневой бан), проверки уровня коэффициента и получения комплексных рекомендаций.", { reply_markup: kb });
     }
 
     if (text === "Цены на топливо ⛽️") {
@@ -292,32 +292,33 @@ bot.on("message:text", async (ctx) => {
         const f = await Fuel.findOne({ city: user.city });
         const kb = new InlineKeyboard();
         if (ADMINS.includes(userId)) kb.text("Изменить цены 📝", `edit_fuel_${user.city}`);
-        return ctx.reply(`⛽️ **Цены ${user.city}:**\n\n${f ? f.prices : "Цены пока не указаны."}`, { parse_mode: "Markdown", reply_markup: kb });
+        return ctx.reply(`⛽️ **Цены ${user.city}:**\n\n${f ? f.prices : "92: — | 95: — | ДТ: — | Газ: —"}`, { parse_mode: "Markdown", reply_markup: kb });
     }
 
     if (text === "Мой профиль 👤") {
-        const exp = user?.expiryDate ? dayjs(user.expiryDate).format("DD.MM.YYYY") : "Нет";
-        return ctx.reply(`👤 **Профиль:**\nID: ${user?.name}\nДоступ до: ${exp}`, { parse_mode: "Markdown" });
+        if (!user) return;
+        const exp = user.expiryDate ? dayjs(user.expiryDate).format("DD.MM.YYYY") : "Нет";
+        return ctx.reply(`👤 **Профиль:**\nID: ${user.name}\nГород: ${user.city}\nДоступ до: ${exp}`, { parse_mode: "Markdown" });
     }
 
+    // АДМИН ПАНЕЛЬ
     if (text === "Аналитика 📊" && ADMINS.includes(userId)) {
-        const u = await User.countDocuments();
-        const e = await Event.countDocuments();
-        const t = await Taxi.countDocuments();
-        return ctx.reply(`📊 Статистика:\nВодителей: ${u}\nАктивных зон: ${e}\nМашинок в базе: ${t}`);
+        const uCount = await User.countDocuments();
+        const eCount = await Event.countDocuments();
+        return ctx.reply(`📊 **Статистика:**\nВодителей: ${uCount}\nЗон: ${eCount}`);
     }
 
     if (text === "Список водителей 📋" && ADMINS.includes(userId)) {
         const users = await User.find().sort({ regDate: -1 }).limit(30);
         const kb = new InlineKeyboard();
         users.forEach(u => kb.text(`${u.isAllowed ? "🟢" : "🔴"} ${u.name || u.userId}`, `manage_${u.userId}`).row());
-        return ctx.reply("👥 Список:", { reply_markup: kb });
+        return ctx.reply("👥 Список водителей:", { reply_markup: kb });
     }
 
     if (text === "Обновить карту 🔄" && ADMINS.includes(userId)) {
-        await ctx.reply("📡 Обновляю зоны...");
+        await ctx.reply("📡 Обновляю точки...");
         const count = await updateAllCities();
-        return ctx.reply(`✅ Зоны обновлены: ${count}`);
+        return ctx.reply(`✅ Карта обновлена! Добавлено зон: ${count}`);
     }
 
     if (ctx.session.step === "wait_tariff") {
@@ -330,7 +331,7 @@ bot.on("message:text", async (ctx) => {
 bot.catch((err) => console.error(err));
 bot.start();
 
-// --- API СЕРВЕР (ДИНАМИКА) ---
+// --- API СЕРВЕР ---
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -340,10 +341,8 @@ const server = http.createServer(async (req, res) => {
         const lat = parseFloat(url.searchParams.get('lat')) || 55.75; 
         const lng = parseFloat(url.searchParams.get('lng')) || 37.61;
         
-        // Зоны берем из базы
         const events = await Event.find({ city });
-        // Машинки генерируем на лету вокруг GPS
-        const taxis = await getDynamicTaxis(lat, lng, city);
+        const taxis = await generateTaxisAroundUser(lat, lng, city);
         
         res.end(JSON.stringify({ events, taxis }));
     } else {
