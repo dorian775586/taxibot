@@ -45,42 +45,42 @@ const Taxi = mongoose.model("Taxi", new mongoose.Schema({
 
 bot.use(session({ initial: () => ({ step: "idle", tariff: null, replyToUser: null, editingCity: null }) }));
 
-// --- 🚀 ГЕНЕРАЦИЯ ТАКСИ (СТРОГО ВОКРУГ GPS ВОДИТЕЛЯ) ---
-async function generateTaxisAroundUser(userLat, userLng, cityName) {
-    // Удаляем старые записи машин
-    await Taxi.deleteMany({ expireAt: { $lt: new Date() } });
+// --- 🚀 ГЕНЕРАЦИЯ ТАКСИ (ПРИНЦИП ФИОЛЕТОВЫХ ЗОН) ---
+async function generateTaxisInDatabase(userLat, userLng, cityName) {
+    // Чистим старые машины перед созданием новых, чтобы не забивать базу
+    await Taxi.deleteMany({
+        $or: [
+            { expireAt: { $lt: new Date() } },
+            { 
+              lat: { $gt: userLat - 0.2, $lt: userLat + 0.2 },
+              lng: { $gt: userLng - 0.2, $lt: userLng + 0.2 }
+            }
+        ]
+    });
     
-    const zones = await Event.find({ city: cityName });
     const newTaxis = [];
-    const count = 20 + Math.floor(Math.random() * 10); // Увеличил количество до 20-30 машин
+    const count = 25; 
 
     for (let i = 0; i < count; i++) {
-        // Генерация в радиусе ~10-15 км от текущего GPS водителя
-        let lat = userLat + (Math.random() - 0.5) * 0.15; 
-        let lng = userLng + (Math.random() - 0.5) * 0.15;
-
-        // Проверка на фиолетовую зону (чтобы не кучковались в зонах высокого спроса)
-        let inZone = zones.some(z => {
-            const dist = Math.sqrt(Math.pow(z.lat - lat, 2) + Math.pow(z.lng - lng, 2));
-            return dist < 0.012; 
-        });
-
-        if (inZone && Math.random() > 0.15) {
-            lat += (Math.random() > 0.5 ? 0.03 : -0.03);
-            lng += (Math.random() > 0.5 ? 0.03 : -0.03);
-        }
+        // Разброс строго в радиусе ~15 км от GPS
+        let lat = userLat + (Math.random() - 0.5) * 0.18; 
+        let lng = userLng + (Math.random() - 0.5) * 0.18;
 
         newTaxis.push({
-            city: cityName, lat: lat, lng: lng,
+            city: cityName, 
+            lat: lat, 
+            lng: lng,
             expireAt: dayjs().add(15, 'minute').toDate()
         });
     }
     
-    if (newTaxis.length) await Taxi.insertMany(newTaxis);
+    if (newTaxis.length) {
+        await Taxi.insertMany(newTaxis);
+    }
     return newTaxis;
 }
 
-// --- 🚀 КОРРЕКТНОЕ ОБНОВЛЕНИЕ ЗОН ПО ВСЕМ ГОРОДАМ ---
+// --- 🚀 ОБНОВЛЕНИЕ ЗОН ПО ВСЕМ ГОРОДАМ ---
 async function updateAllCities() {
     const CITIES_LIST = [
         { slug: "msk", name: "Москва" },
@@ -91,12 +91,11 @@ async function updateAllCities() {
         { slug: "che", name: "Челябинск" }
     ];
 
-    await Event.deleteMany({}); // Чистим всё старое
+    await Event.deleteMany({}); 
     let total = 0;
 
     for (const cityObj of CITIES_LIST) {
         try {
-            // Увеличил page_size до 50, чтобы точек было больше
             const url = `https://kudago.com/public-api/v1.4/events/?location=${cityObj.slug}&fields=place,dates,title&page_size=50&expand=place&actual_since=${Math.floor(Date.now()/1000)}`;
             const { data } = await axios.get(url);
             
@@ -108,7 +107,7 @@ async function updateAllCities() {
                     address: i.place.address,
                     lat: i.place.coords.lat,
                     lng: i.place.coords.lon,
-                    expireAt: dayjs().add(1, 'hour').toDate()
+                    expireAt: dayjs().add(2, 'hour').toDate()
                 }));
 
             if (events.length > 0) { 
@@ -119,7 +118,7 @@ async function updateAllCities() {
     }
     return total;
 }
-setInterval(updateAllCities, 1800000); // Обновление раз в 30 минут
+setInterval(updateAllCities, 1800000); 
 
 // --- 🛠️ КЛАВИАТУРЫ ---
 function getMainKeyboard(userId) {
@@ -143,7 +142,7 @@ function getCitiesKeyboard() {
     return kb;
 }
 
-// --- 🤖 ЛОГИКА (ТЕХПОДДЕРЖКА И АНАЛИЗ ВОССТАНОВЛЕНЫ) ---
+// --- 🤖 ЛОГИКА ---
 bot.command("start", async (ctx) => {
     let user = await User.findOne({ userId: ctx.from.id });
     if (!user) {
@@ -321,7 +320,7 @@ bot.on("message:text", async (ctx) => {
 bot.catch((err) => console.error(err));
 bot.start();
 
-// --- 🌐 API СЕРВЕР (ИСПРАВЛЕННЫЙ) ---
+// --- 🌐 API СЕРВЕР (ГЕНЕРАЦИЯ ЧЕРЕЗ БАЗУ) ---
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -331,14 +330,22 @@ const server = http.createServer(async (req, res) => {
         const lat = parseFloat(url.searchParams.get('lat'));
         const lng = parseFloat(url.searchParams.get('lng'));
         
+        // 1. Если пришли координаты, создаем машины в базе
+        if (!isNaN(lat) && !isNaN(lng)) {
+            await generateTaxisInDatabase(lat, lng, city);
+        }
+
+        // 2. Достаем зоны из базы
         const events = await Event.find({ city });
         
+        // 3. Достаем машины из базы (только те, что рядом с водителем)
         let taxis = [];
-        // Генерируем машины ТОЛЬКО если есть GPS
         if (!isNaN(lat) && !isNaN(lng)) {
-            taxis = await generateTaxisAroundUser(lat, lng, city);
+            taxis = await Taxi.find({
+                lat: { $gt: lat - 0.2, $lt: lat + 0.2 },
+                lng: { $gt: lng - 0.2, $lt: lng + 0.2 }
+            }).limit(30);
         } else {
-            // Если GPS нет, берем любые активные машины из базы для этого города
             taxis = await Taxi.find({ city }).limit(20);
         }
         
