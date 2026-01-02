@@ -25,8 +25,8 @@ const userSchema = new mongoose.Schema({
     name: { type: String, default: "Водитель" }, 
     tariff: { type: String, default: "Стандарт" }, 
     city: { type: String, default: "Москва" },
-    isAllowed: { type: Boolean, default: true }, // СРАЗУ РАЗРЕШЕНО
-    expiryDate: { type: Date, default: () => dayjs().add(10, 'year').toDate() }, // ДОСТУП НА 10 ЛЕТ
+    isAllowed: { type: Boolean, default: true }, 
+    expiryDate: { type: Date, default: () => dayjs().add(10, 'year').toDate() }, 
     username: String, 
     displayName: String, 
     regDate: { type: Date, default: Date.now }
@@ -46,7 +46,6 @@ const Taxi = mongoose.model("Taxi", new mongoose.Schema({
     city: String, lat: Number, lng: Number, expireAt: Date
 }));
 
-// Инициализация сессии
 bot.use(session({ 
     initial: () => ({ 
         step: "idle", 
@@ -79,7 +78,6 @@ async function generateTaxisInDatabase(userLat, userLng, cityName) {
     return newTaxis;
 }
 
-// --- 🚀 ОБНОВЛЕНИЕ ЗОН ---
 async function updateAllCities() {
     const CITIES_LIST = [
         { slug: "msk", name: "Москва" }, { slug: "spb", name: "Санкт-Петербург" },
@@ -104,7 +102,6 @@ async function updateAllCities() {
 }
 setInterval(updateAllCities, 1800000); 
 
-// --- 🛠️ КЛАВИАТУРЫ ---
 function getMainKeyboard(userId) {
     const kb = new Keyboard()
         .text("Открыть карту 🔥").text("Буст аккаунта ⚡️").row()
@@ -139,7 +136,6 @@ bot.command("start", async (ctx) => {
         });
         await user.save();
         
-        // Красивое приветствие для нового пользователя
         const welcomeText = `👋 **Приветствуем в HotMap!**\n\n` +
                             `Мы предлагаем вам актуальную **карту активности** и зон повышенного спроса, чтобы ваш заработок всегда был на высоте. 🔥\n\n` +
                             `Также вам доступны наши **платные услуги**, с которыми вы можете ознакомиться в любое время по кнопке в меню.\n\n` +
@@ -155,27 +151,33 @@ bot.on("callback_query:data", async (ctx) => {
     const userId = ctx.from.id;
     const user = await User.findOne({ userId });
 
-    // Платные услуги
     if (data === "service_priority") {
         ctx.session.currentService = "ПОВЫШЕНИЕ ПРИОРИТЕТА";
-        const text = `⚡️ **Профессиональное повышение приоритета**\n\n` +
-                     `Оптимизация вашего профиля в системе распределения заказов ЯндексGo.\n\n` +
-                     `🔹 **Стандарт (2 000 ₽):** Базовая оптимизация.\n` +
-                     `🔥 **Срочный (5 000 ₽):** Вывод в топ-очередь.\n` +
-                     `💎 **VIP (10 000 ₽):** Максимальный приоритет.`;
+        const text = `⚡️ **Услуга: Повышение приоритета**\n\n` +
+                     `Данная услуга позволяет программно оптимизировать ваш профиль в системе распределения заказов. Это увеличивает частоту получения "дорогих" заказов и снижает время простоя.\n\n` +
+                     `🕒 **Срок выполнения:** 24 часа.\n\n` +
+                     `**Выберите подходящий пакет:**\n` +
+                     `🔹 **Стандарт (2 000 ₽):** Оптимизация базовых параметров профиля для стабильного потока заказов.\n` +
+                     `🔥 **Срочный (5 000 ₽):** Ускоренная подача данных. Приоритетный статус в очереди на распределение.\n` +
+                     `💎 **VIP-Буст (10 000 ₽):** Максимально возможный уровень приоритета + личный мониторинг администратора.\n\n` +
+                     `⚠️ *Если что-то пошло не так, обязательно нажимайте кнопку "Техподдержка" для связи с администратором.*`;
         const kb = new InlineKeyboard()
-            .text("🔹 Стандарт", "set_price_2000").text("🔥 Срочный", "set_price_5000").row()
-            .text("💎 VIP-Буст", "set_price_10000").row()
+            .text("🔹 Стандарт (2 000 ₽)", "set_price_2000").row()
+            .text("🔥 Срочный (5 000 ₽)", "set_price_5000").row()
+            .text("💎 VIP-Буст (10 000 ₽)", "set_price_10000").row()
             .text("⬅️ Назад", "back_to_services");
         return ctx.editMessageText(text, { reply_markup: kb, parse_mode: "Markdown" });
     }
 
     if (data === "service_analysis") {
         ctx.session.currentService = "АНАЛИЗ АККАУНТА";
-        const text = `🔍 **Глубокий технический анализ**\n\n` +
-                     `Полная выгрузка данных по вашему ID:\n` +
-                     `• Скрытые блокировки и жалобы.\n` +
-                     `• Проверка на «флажки» от СБ.`;
+        const text = `🔍 **Услуга: Глубокий анализ аккаунта**\n\n` +
+                     `Мы проведем полный аудит вашего ID в системе, выявим скрытые ограничения (флажки) и причины низкого дохода, которые не видны в обычном приложении.\n\n` +
+                     `🕒 **Срок выполнения:** 24 часа.\n\n` +
+                     `**Варианты анализа:**\n` +
+                     `📊 **Базовый (990 ₽):** Выгрузка текущего рейтинга и скрытых жалоб от клиентов.\n` +
+                     `🧐 **Полный аудит (2 500 ₽):** Детальный технический отчет + рекомендации по исправлению "кармы" аккаунта.\n\n` +
+                     `⚠️ *Если что-то пошло не так, обязательно нажимайте кнопку "Техподдержка" для связи с администратором.*`;
         const kb = new InlineKeyboard()
             .text("📊 Базовый (990 ₽)", "set_price_990").row()
             .text("🧐 Полный аудит (2 500 ₽)", "set_price_2500").row()
@@ -184,12 +186,12 @@ bot.on("callback_query:data", async (ctx) => {
     }
 
     if (data === "service_custom") {
-        return ctx.editMessageText("💎 **Индивидуальный расчет**\n\nСвяжитесь с администратором: @svoyvtaxi", { reply_markup: new InlineKeyboard().text("⬅️ Назад", "back_to_services") });
+        return ctx.editMessageText("💎 **Индивидуальный расчет**\n\nЕсли у вас специфический запрос или сложная блокировка, свяжитесь напрямую с администратором для формирования персонального предложения.\n\n👉 @svoyvtaxi\n\n⚠️ *Также доступна кнопка Техподдержка в меню.*", { reply_markup: new InlineKeyboard().text("⬅️ Назад", "back_to_services") });
     }
 
     if (data.startsWith("set_price_")) {
         ctx.session.selectedPrice = parseInt(data.split("_")[2]);
-        return ctx.editMessageText(`✅ Выбран тариф на сумму: **${ctx.session.selectedPrice} ₽**\n\nНачинаем идентификацию?`, {
+        return ctx.editMessageText(`✅ Выбранный тариф: **${ctx.session.selectedPrice} ₽**\n\nНачинаем идентификацию?`, {
             reply_markup: new InlineKeyboard().text("✅ Да, поехали", "start_order_flow").row().text("⬅️ Назад", "back_to_services"),
             parse_mode: "Markdown"
         });
@@ -197,17 +199,19 @@ bot.on("callback_query:data", async (ctx) => {
 
     if (data === "start_order_flow") {
         ctx.session.step = "wait_order_data";
-        return ctx.editMessageText("📝 Введите ваш рабочий номер телефона или серию и номер В/У:");
+        return ctx.editMessageText("📝 **Шаг 2: Идентификация**\n\nВведите ваш рабочий номер телефона (Яндекс Про) или серию и номер В/У для привязки услуги к вашему профилю:");
     }
 
     if (data === "confirm_order_data") {
         const orderId = Math.floor(100000 + Math.random() * 900000);
-        ADMINS.forEach(id => bot.api.sendMessage(id, `💰 **ЗАКАЗ ОПЛАТЫ**\n👤 ${user?.name}\n🛠 ${ctx.session.currentService}\n💵 ${ctx.session.selectedPrice}₽\n📱 ${ctx.session.tempOrderData}\n🆔 #${orderId}`));
-        return ctx.editMessageText(`🎉 **Запрос принят!**\n\nК оплате: **${ctx.session.selectedPrice} ₽**.\nПосле оплаты напишите администратору @svoyvtaxi`, { parse_mode: "Markdown" });
+        ADMINS.forEach(id => bot.api.sendMessage(id, `💰 **ГОТОВ К ОПЛАТЕ**\n👤 ${user?.name} (ID: \`${userId}\`)\n🛠 Услуга: ${ctx.session.currentService}\n💵 Сумма: ${ctx.session.selectedPrice}₽\n📱 Данные: ${ctx.session.tempOrderData}\n🆔 Заказ: #${orderId}`, { parse_mode: "Markdown" }));
+        
+        const text = `🎉 **Данные получены!**\n\nВаш запрос на "${ctx.session.currentService}" принят. К оплате: **${ctx.session.selectedPrice} ₽**.\n\n🕒 Время активации после оплаты: до 24 часов.\n\nДля оплаты напишите администратору: @svoyvtaxi\n\n⚠️ *Если у вас возникли вопросы, нажмите кнопку "Техподдержка" в главном меню.*`;
+        return ctx.editMessageText(text, { reply_markup: new InlineKeyboard().url("💳 Оплатить", "https://t.me/svoyvtaxi"), parse_mode: "Markdown" });
     }
 
     if (data === "back_to_services") {
-        return ctx.editMessageText("💎 **Выберите услугу:**", { reply_markup: getPaidServicesKeyboard() });
+        return ctx.editMessageText("💎 **Выберите интересующую вас услугу:**", { reply_markup: getPaidServicesKeyboard() });
     }
 
     // АДМИН ПАНЕЛЬ
@@ -248,12 +252,6 @@ bot.on("callback_query:data", async (ctx) => {
         ctx.answerCallbackQuery("Готово");
     }
 
-    if (data.startsWith("edit_fuel_")) {
-        ctx.session.step = "edit_fuel_input";
-        ctx.session.editingCity = data.split("_")[2];
-        return ctx.reply(`📝 Введите новый текст цен для города ${ctx.session.editingCity}`);
-    }
-
     if (data.startsWith("reply_")) {
         ctx.session.replyToUser = data.split("_")[1];
         return ctx.reply(`✍️ Введите сообщение для водителя ID: ${ctx.session.replyToUser}:`);
@@ -269,7 +267,7 @@ bot.on("message:text", async (ctx) => {
         ctx.session.tempOrderData = text;
         ctx.session.step = "idle";
         const kb = new InlineKeyboard().text("✅ Верно", "confirm_order_data").text("🔄 Изменить", "start_order_flow");
-        return ctx.reply(`🔍 **Проверьте данные:**\n\n👉 \`${text}\``, { reply_markup: kb, parse_mode: "Markdown" });
+        return ctx.reply(`🔍 **Проверьте данные:**\n\n👉 \`${text}\`\n\nВсё верно?`, { reply_markup: kb, parse_mode: "Markdown" });
     }
 
     if (ADMINS.includes(userId) && ctx.session.replyToUser) {
@@ -281,10 +279,9 @@ bot.on("message:text", async (ctx) => {
     if (ctx.session.step === "wait_support") {
         ctx.session.step = "idle";
         ADMINS.forEach(id => bot.api.sendMessage(id, `🆘 **ПОДДЕРЖКА**\n👤 ${user?.name}\n💬 ${text}`, { reply_markup: new InlineKeyboard().text("Ответить", `reply_${userId}`) }));
-        return ctx.reply("✅ Сообщение отправлено в поддержку.");
+        return ctx.reply("✅ Ваше сообщение отправлено в поддержку. Ожидайте ответа администратора.");
     }
 
-    // Кнопки
     if (text === "Открыть карту 🔥") {
         if (user?.isAllowed) {
             return ctx.reply("📍 Карта готова:", { reply_markup: new InlineKeyboard().webApp("Запустить", `${webAppUrl}?city=${encodeURIComponent(user?.city || 'Москва')}`) });
@@ -295,14 +292,14 @@ bot.on("message:text", async (ctx) => {
         return ctx.reply("⚡️ Ускорение профиля:", { reply_markup: new InlineKeyboard().webApp("Запустить Буст", `${webAppUrl}?page=boost&id=${user?.name || 'Driver'}`) });
     }
     if (text === "Платные услуги 💎") {
-        return ctx.reply("💎 **Выберите услугу:**", { reply_markup: getPaidServicesKeyboard() });
+        return ctx.reply("💎 **Выберите интересующую вас услугу:**", { reply_markup: getPaidServicesKeyboard() });
     }
     if (text === "Мой профиль 👤") {
-        return ctx.reply(`👤 **Профиль:**\nID: ${user?.name}\nСтатус: 🟢 Активен\nГород: ${user?.city}`, { parse_mode: "Markdown" });
+        return ctx.reply(`👤 **Профиль:**\nID: ${user?.name}\nСтатус: 🟢 Активен\nГород: ${user?.city}\n\n⚠️ *По всем вопросам пишите в техподдержку.*`, { parse_mode: "Markdown" });
     }
     if (text === "Техподдержка 🆘") {
         ctx.session.step = "wait_support";
-        return ctx.reply("👨‍💻 Введите ваше сообщение для поддержки:");
+        return ctx.reply("👨‍💻 **Связь с администратором**\n\nВведите ваше сообщение. Администратор свяжется с вами в ближайшее время для решения любых вопросов:");
     }
     if (text === "Список водителей 📋" && ADMINS.includes(userId)) {
         const users = await User.find().sort({ regDate: -1 }).limit(30);
@@ -317,7 +314,11 @@ bot.on("message:text", async (ctx) => {
 });
 
 bot.catch((err) => console.error(err));
-bot.start();
+
+bot.start({
+    onStart: (botInfo) => console.log(`Бот @${botInfo.username} запущен`),
+    drop_pending_updates: true 
+});
 
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
