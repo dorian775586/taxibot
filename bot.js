@@ -46,13 +46,10 @@ const Taxi = mongoose.model("Taxi", new mongoose.Schema({
 
 bot.use(session({ initial: () => ({ step: "idle", tariff: null, replyToUser: null, editingCity: null }) }));
 
-// --- 🚀 ГЕНЕРАЦИЯ ТАКСИ (ИСПРАВЛЕННАЯ ЛОГИКА) ---
+// --- 🚀 ГЕНЕРАЦИЯ ТАКСИ ---
 async function generateTaxisInDatabase(userLat, userLng, cityName) {
-    // 1. Удаляем только старые машины по времени
     await Taxi.deleteMany({ expireAt: { $lt: new Date() } });
     
-    // 2. Проверяем, есть ли уже машины рядом с водителем
-    // Если их больше 10, новые не генерим, чтобы не спамить в аналитику
     const existingCount = await Taxi.countDocuments({
         lat: { $gt: userLat - 0.1, $lt: userLat + 0.1 },
         lng: { $gt: userLng - 0.1, $lt: userLng + 0.1 }
@@ -64,7 +61,6 @@ async function generateTaxisInDatabase(userLat, userLng, cityName) {
     const count = 20; 
 
     for (let i = 0; i < count; i++) {
-        // Разброс ~10-15 км
         let lat = userLat + (Math.random() - 0.5) * 0.15; 
         let lng = userLng + (Math.random() - 0.5) * 0.15;
 
@@ -82,7 +78,7 @@ async function generateTaxisInDatabase(userLat, userLng, cityName) {
     return newTaxis;
 }
 
-// --- 🚀 ОБНОВЛЕНИЕ ЗОН ПО ВСЕМ ГОРОДАМ ---
+// --- 🚀 ОБНОВЛЕНИЕ ЗОН ---
 async function updateAllCities() {
     const CITIES_LIST = [
         { slug: "msk", name: "Москва" },
@@ -127,7 +123,7 @@ function getMainKeyboard(userId) {
     const kb = new Keyboard()
         .text("Открыть карту 🔥").text("Буст аккаунта ⚡️").row()
         .text("Цены на топливо ⛽️").text("Мой профиль 👤").row()
-        .text("Анализ аккаунта 🔍").row()
+        .text("Платные услуги 💎").row()
         .text("Техподдержка 🆘");
     if (ADMINS.includes(userId)) {
         kb.row().text("Аналитика 📊").text("Список водителей 📋").row().text("Обновить карту 🔄");
@@ -142,6 +138,12 @@ function getCitiesKeyboard() {
         if ((i + 1) % 2 === 0) kb.row();
     });
     return kb;
+}
+
+function getPaidServicesKeyboard() {
+    return new InlineKeyboard()
+        .text("🚀 Повышение приоритета", "service_priority").row()
+        .text("🔍 Глубокий анализ аккаунта", "service_analysis").row();
 }
 
 // --- 🤖 ЛОГИКА ---
@@ -159,7 +161,50 @@ bot.command("start", async (ctx) => {
 
 bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
+    const userId = ctx.from.id;
+    const user = await User.findOne({ userId });
 
+    // Услуга: Приоритет
+    if (data === "service_priority") {
+        const text = `⚡️ **Профессиональное повышение приоритета**\n\n` +
+                     `Данная услуга позволяет искусственно оптимизировать ваш профиль в системе распределения заказов. Наша команда инсайдеров вносит корректировки в CRM, которые позволяют вашему аккаунту получать заказы в «первой очереди».\n\n` +
+                     `✅ **Срок выполнения:** до 24 часов.\n` +
+                     `🛡 **Гарантия:** Мы работаем через прямой доступ. Если в течение суток изменения не вступили в силу — немедленно жмите кнопку «Техподдержка», мы разберемся в ситуации.\n\n` +
+                     `💳 **Стоимость:** 1 990 ₽`;
+        const kb = new InlineKeyboard().text("💳 Оплатить услугу", "pay_priority").row().text("⬅️ Назад", "back_to_services");
+        return ctx.editMessageText(text, { reply_markup: kb, parse_mode: "Markdown" });
+    }
+
+    // Услуга: Анализ
+    if (data === "service_analysis") {
+        const text = `🔍 **Глубокий технический анализ аккаунта**\n\n` +
+                     `Мы выгрузим полные данные по вашему ID из внутренней системы администрирования. Вы узнаете всё, что скрыто от глаз водителя и таксопарка:\n\n` +
+                     `🔹 Наличие скрытых (теневых) блокировок и их причины.\n` +
+                     `🔹 Реальная причина низкого приоритета и методы исправления.\n` +
+                     `🔹 История жалоб, которые не отображаются в Яндекс Про.\n` +
+                     `🔹 Полный аудит профиля на наличие «флажков» от СБ.\n\n` +
+                     `💳 **Стоимость:** 990 ₽`;
+        const kb = new InlineKeyboard().text("✅ Я согласен", "accept_analysis_flow").row().text("⬅️ Назад", "back_to_services");
+        return ctx.editMessageText(text, { reply_markup: kb, parse_mode: "Markdown" });
+    }
+
+    // Логика кнопок оплаты
+    if (data === "pay_priority") {
+        ADMINS.forEach(id => bot.api.sendMessage(id, `💰 **КЛИК ПО ОПЛАТЕ**\n👤 ${user?.name}\n🛠 Услуга: ПРИОРИТЕТ`));
+        return ctx.reply("Для оплаты перейдите по ссылке нашего менеджера. После оплаты пришлите скриншот в техподдержку.\n\n👉 Ссылка: https://t.me/svoyvtaxi");
+    }
+
+    if (data === "accept_analysis_flow") {
+        ADMINS.forEach(id => bot.api.sendMessage(id, `💰 **КЛИК ПО ОПЛАТЕ**\n👤 ${user?.name}\n🛠 Услуга: АНАЛИЗ АККАУНТА`));
+        const kb = new InlineKeyboard().url("💳 Перейти к оплате", "https://t.me/svoyvtaxi").row().text("⬅️ Назад", "service_analysis");
+        return ctx.editMessageText("Для запуска процесса глубокого анализа профиля, пожалуйста, произведите оплату. После подтверждения операции данные будут сформированы и отправлены вам в личные сообщения.", { reply_markup: kb });
+    }
+
+    if (data === "back_to_services") {
+        return ctx.editMessageText("💎 **Выберите интересующую вас услугу:**", { reply_markup: getPaidServicesKeyboard() });
+    }
+
+    // Сохраненная логика админки и регистрации
     if (data.startsWith("edit_fuel_")) {
         ctx.session.step = "edit_fuel_input";
         ctx.session.editingCity = data.split("_")[2];
@@ -173,26 +218,19 @@ bot.on("callback_query:data", async (ctx) => {
         return ctx.reply(`✍️ Введите сообщение для ответа водителю (ID: ${ctx.session.replyToUser}):`);
     }
 
-    if (data === "accept_analysis") {
-        ctx.session.step = "wait_phone";
-        return ctx.editMessageText("📞 Пожалуйста, введите ваш контактный номер телефона:");
-    }
-
-    if (data === "cancel_analysis") return ctx.editMessageText("🏠 Меню.");
-
     if (data.startsWith("regcity_")) {
         const city = data.split("_")[1];
         const count = await User.countDocuments();
-        const user = new User({
+        const newUser = new User({
             userId: ctx.from.id, username: ctx.from.username || "—",
             displayName: ctx.from.first_name || "Без имени",
             tariff: ctx.session.tariff, city: city,
             name: `Водитель #${count + 1}`, isAllowed: false
         });
-        await user.save();
+        await newUser.save();
         ctx.session.step = "idle";
-        await ctx.editMessageText(`✅ Заявка отправлена!\nID: ${user.name}\nГород: ${city}`);
-        ADMINS.forEach(id => bot.api.sendMessage(id, `🔔 Новая заявка: ${user.name} (@${ctx.from.username || 'нет'})`));
+        await ctx.editMessageText(`✅ Заявка отправлена!\nID: ${newUser.name}\nГород: ${city}`);
+        ADMINS.forEach(id => bot.api.sendMessage(id, `🔔 Новая заявка: ${newUser.name} (@${ctx.from.username || 'нет'})`));
     }
 
     if (!ADMINS.includes(ctx.from.id)) return;
@@ -259,8 +297,8 @@ bot.on("message:text", async (ctx) => {
         return ctx.reply("👋 Напишите вашу проблему:");
     }
 
-    if (text === "Анализ аккаунта 🔍") {
-        return ctx.reply("📈 Заказать анализ аккаунта?", { reply_markup: new InlineKeyboard().text("✅ Согласен", "accept_analysis").text("❌ Отмена", "cancel_analysis") });
+    if (text === "Платные услуги 💎") {
+        return ctx.reply("💎 **Выберите интересующую вас услугу:**", { reply_markup: getPaidServicesKeyboard() });
     }
 
     if (text === "Цены на топливо ⛽️") {
@@ -297,7 +335,7 @@ bot.on("message:text", async (ctx) => {
 bot.catch((err) => console.error(err));
 bot.start();
 
-// --- 🌐 API СЕРВЕР (ГЕНЕРАЦИЯ ЧЕРЕЗ БАЗУ) ---
+// --- 🌐 API СЕРВЕР ---
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -307,15 +345,12 @@ const server = http.createServer(async (req, res) => {
         const lat = parseFloat(url.searchParams.get('lat'));
         const lng = parseFloat(url.searchParams.get('lng'));
         
-        // 1. Создаем машины в базе только если есть координаты и их там мало
         if (!isNaN(lat) && !isNaN(lng)) {
             await generateTaxisInDatabase(lat, lng, city);
         }
 
-        // 2. Достаем зоны KudaGo
         const events = await Event.find({ city });
         
-        // 3. Достаем машины рядом с водителем (в радиусе ~20км)
         let taxis = [];
         if (!isNaN(lat) && !isNaN(lng)) {
             taxis = await Taxi.find({
