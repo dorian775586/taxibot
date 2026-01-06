@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const http = require("http");
 const dayjs = require("dayjs");
 const axios = require("axios");
+const crypto = require("crypto");
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 
@@ -14,6 +15,10 @@ const webAppUrl = "https://hotmaptaxi-git-main-dorians-projects-14978635.vercel.
 const mongoUri = "mongodb+srv://user775586:user775586@cluster0.36spuej.mongodb.net/?appName=Cluster0"; 
 
 const ADMINS = [623203896, 7469074713];
+
+// --- ДАННЫЕ CACTUSPAY ---
+const CACTUS_SHOP_ID = 1715; 
+const CACTUS_TOKEN = "1ebfe4967f72b357b7482047"; 
 
 const bot = new Bot(token);
 
@@ -203,11 +208,21 @@ bot.on("callback_query:data", async (ctx) => {
     }
 
     if (data === "confirm_order_data") {
-        const orderId = Math.floor(100000 + Math.random() * 900000);
-        ADMINS.forEach(id => bot.api.sendMessage(id, `💰 **ГОТОВ К ОПЛАТЕ**\n👤 ${user?.name} (ID: \`${userId}\`)\n🛠 Услуга: ${ctx.session.currentService}\n💵 Сумма: ${ctx.session.selectedPrice}₽\n📱 Данные: ${ctx.session.tempOrderData}\n🆔 Заказ: #${orderId}`, { parse_mode: "Markdown" }));
+        const orderId = `order_${userId}_${Math.floor(Date.now() / 1000)}`;
         
-        const text = `🎉 **Данные получены!**\n\nВаш запрос на "${ctx.session.currentService}" принят. К оплате: **${ctx.session.selectedPrice} ₽**.\n\n🕒 Время активации после оплаты: до 24 часов.\n\nДля оплаты напишите администратору: @svoyvtaxi\n\n⚠️ *Если у вас возникли вопросы, нажмите кнопку "Техподдержка" в главном меню.*`;
-        return ctx.editMessageText(text, { reply_markup: new InlineKeyboard().url("💳 Оплатить", "https://t.me/svoyvtaxi"), parse_mode: "Markdown" });
+        // Формируем прямую ссылку на оплату CactusPay
+        const paymentUrl = `https://lk.cactuspay.pro/pay?shop_id=${CACTUS_SHOP_ID}&amount=${ctx.session.selectedPrice}&order_id=${orderId}&description=${encodeURIComponent(ctx.session.currentService)}&customer=${userId}`;
+
+        ADMINS.forEach(id => bot.api.sendMessage(id, `💰 **ЗАПРОС НА ОПЛАТУ**\n👤 ${user?.name} (ID: \`${userId}\`)\n🛠 Услуга: ${ctx.session.currentService}\n💵 Сумма: ${ctx.session.selectedPrice}₽\n📱 Данные: ${ctx.session.tempOrderData}\n🆔 Заказ: ${orderId}`, { parse_mode: "Markdown" }));
+        
+        const text = `🎉 **Данные получены!**\n\nВаш запрос на "${ctx.session.currentService}" принят. К оплате: **${ctx.session.selectedPrice} ₽**.\n\n🕒 Время активации после оплаты: до 24 часов.\n\nНажмите кнопку ниже, чтобы оплатить через защищенный шлюз (СБП/Карты).`;
+        
+        return ctx.editMessageText(text, { 
+            reply_markup: new InlineKeyboard()
+                .url("💳 Перейти к оплате", paymentUrl).row()
+                .text("⬅️ Назад", "back_to_services"), 
+            parse_mode: "Markdown" 
+        });
     }
 
     if (data === "back_to_services") {
@@ -323,6 +338,34 @@ bot.start({
 const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const url = new URL(req.url, `http://${req.headers.host}`);
+
+    // --- ОБРАБОТКА WEBHOOK CACTUSPAY ---
+    if (req.method === 'POST' && req.url === '/cactus-webhook') {
+        let body = '';
+        req.on('data', chunk => { body += chunk.toString(); });
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(body);
+                if (data.status === 1) {
+                    const userId = data.customer;
+                    await bot.api.sendMessage(userId, 
+                        `✅ **Оплата получена!**\n\nСумма: ${data.amount} ₽\nУслуга активирована. Спасибо, что вы с нами!`, 
+                        { parse_mode: "Markdown" }
+                    );
+                    ADMINS.forEach(id => bot.api.sendMessage(id, 
+                        `💰 **УДАЧНАЯ ОПЛАТА**\n👤 Пользователь: \`${userId}\`\n💵 Сумма: ${data.amount} ₽`, 
+                        { parse_mode: "Markdown" }
+                    ));
+                }
+                res.end(JSON.stringify({ status: "ok" }));
+            } catch (e) {
+                res.end(JSON.stringify({ status: "error" }));
+            }
+        });
+        return;
+    }
+
+    // --- API КАРТЫ ---
     if (req.url.startsWith('/api/points')) {
         const city = url.searchParams.get('city') || "Москва";
         const lat = parseFloat(url.searchParams.get('lat'));
@@ -330,6 +373,9 @@ const server = http.createServer(async (req, res) => {
         if (!isNaN(lat) && !isNaN(lng)) await generateTaxisInDatabase(lat, lng, city);
         const [events, taxis] = await Promise.all([Event.find({ city }), Taxi.find({ city }).limit(30)]);
         res.end(JSON.stringify({ events, taxis }));
-    } else res.end(JSON.stringify({ status: "running" }));
+    } else {
+        res.end(JSON.stringify({ status: "running" }));
+    }
 });
+
 server.listen(process.env.PORT || 8080);
