@@ -208,10 +208,10 @@ bot.on("callback_query:data", async (ctx) => {
     }
 
     if (data === "confirm_order_data") {
-        const orderId = `order_${userId}_${Math.floor(Date.now() / 1000)}`;
+        const orderId = `id${userId}_${Math.floor(Date.now() / 1000)}`;
         
-        // Формируем прямую ссылку на оплату CactusPay
-        const paymentUrl = `https://lk.cactuspay.pro/pay?shop_id=${CACTUS_SHOP_ID}&amount=${ctx.session.selectedPrice}&order_id=${orderId}&description=${encodeURIComponent(ctx.session.currentService)}&customer=${userId}`;
+        // --- ЗАМЕНА ЗДЕСЬ: Правильная платежная ссылка ---
+        const paymentUrl = `https://pay.cactuspay.pro/?shop_id=${CACTUS_SHOP_ID}&amount=${ctx.session.selectedPrice}&order_id=${orderId}&description=${encodeURIComponent(ctx.session.currentService)}&customer=${userId}&success_url=https://t.me/hotmaptaxi_bot`;
 
         ADMINS.forEach(id => bot.api.sendMessage(id, `💰 **ЗАПРОС НА ОПЛАТУ**\n👤 ${user?.name} (ID: \`${userId}\`)\n🛠 Услуга: ${ctx.session.currentService}\n💵 Сумма: ${ctx.session.selectedPrice}₽\n📱 Данные: ${ctx.session.tempOrderData}\n🆔 Заказ: ${orderId}`, { parse_mode: "Markdown" }));
         
@@ -346,7 +346,8 @@ const server = http.createServer(async (req, res) => {
         req.on('end', async () => {
             try {
                 const data = JSON.parse(body);
-                if (data.status === 1) {
+                // Проверка статуса (может прийти число или строка)
+                if (data.status == 1) {
                     const userId = data.customer;
                     await bot.api.sendMessage(userId, 
                         `✅ **Оплата получена!**\n\nСумма: ${data.amount} ₽\nУслуга активирована. Спасибо, что вы с нами!`, 
